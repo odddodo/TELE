@@ -23,8 +23,8 @@ uint8_t *noiseMap = nullptr;
 // ══════════════════════════════════════════════════════════════ NAVIGATION ══
 // Lissajous path through the map — two independent phase accumulators
 // at incommensurable rates keep the trajectory from repeating quickly.
-static uint16_t navPhaseX = 0;
-static uint16_t navPhaseY = 16384; // quarter-cycle offset
+static float navPhaseX = 0.0f;
+static float navPhaseY = 16384.0f; // quarter-cycle offset
 static int mapOriginX = 224, mapOriginY = 224;
 static uint8_t mapFracX = 0, mapFracY = 0; // sub-pixel fractions (8-bit)
 
@@ -96,62 +96,49 @@ void preparePalette(uint8_t palIdx, uint8_t hueShift)
 
 // ═════════════════════════════════════════════════════════════════ PRESETS ══
 // palIdx:      0=Zebra  42=Hello  85=Smoothie  127=XGA  170=Arctic  213=Italy  255=HugMe
-// rippleAmt:   ripple adds to palette index (wraps) — 0=off, 255=strong color waves
-// navDX/navDY: phase delta per frame — 5≈4min cycle, 15≈90s cycle, 30≈45s cycle
+// rippleAmt:   palette scroll speed — 0=frozen  100=gentle  200=fast  255=full
+// navDX/navDY: Lissajous phase delta/frame (φ-ratio pairs) — 0.1≈9hr  1≈55min  15≈3.6min
 struct Preset
 {
     uint8_t palIdx;
     uint8_t hueShift;
     uint8_t phaseOffset;
     uint8_t rippleAmt;
-    uint8_t rippleFreq; // spatial freq: 4=~1 cycle, 12=~3 cycles, 24=~6 cycles/display
-    float zoom;         // map px per display px: 0.25=zoom-in4x  1.0=normal  4.0=zoom-out4x
-    uint16_t navDX;
-    uint16_t navDY;
+    uint8_t rippleFreq; // palette cycles over noise range: 4=1x  16=4x  32=8x  55=14x
+    float zoom;         // map px per display px: 0.01=100x-in  1.0=normal  4.0=4x-out
+    float navDX;
+    float navDY;
     const char *name;
 };
 
 // palIdx: Zebra=0 Hello=42 Smoothie=85 XGA=127 Arctic=170 Italy=213 HugMe=255
-// rippleFreq: 4≈1 cycle  12≈3 cycles  24≈6 cycles across display
-// zoom: <1=zoom-in(features larger)  1.0=normal  >1=zoom-out(features smaller)
+// zoom: <1=zoomed-in(large blobs)  1.0=natural  >1=zoomed-out(fine grain)
 const Preset presets[] = {
-    // ── WARM / FIRE ──────────────────────────────────────────────────────────
-    {42, 0, 0, 50, 5, 0.05f, 5, 8, "LAVA"},
-    {42, 10, 20, 120, 8, .01f, 12, 9, "EMBER"},
-    {213, 0, 40, 180, 10, .02f, 18, 13, "FORGE"},
-    {21, 0, 0, 80, 6, 2.0f, 4, 6, "MAGMA"},
-    {64, 20, 60, 140, 6, .005f, 10, 15, "SUNSET"},
-    // ── COLD / SPACE ─────────────────────────────────────────────────────────
-    {170, 0, 5, 30, 5, 4.0f, 6, 9, "ARCTIC"},
-    {155, 0, 0, 60, 4, 4.0f, 3, 5, "GLACIER"},
-    {127, 0, 80, 160, 15, 2.0f, 20, 14, "FROST"},
-    {0, 0, 60, 200, 12, 1.0f, 8, 11, "COSMOS"},
-    {148, 60, 30, 90, 5, 2.0f, 7, 10, "NIGHT"},
-    // ── GRAPHIC ──────────────────────────────────────────────────────────────
-    {0, 0, 30, 220, 8, 1.0f, 10, 13, "ZEBRA"},
-    {127, 0, 0, 240, 20, 1.0f, 15, 11, "MOSAIC"},
-    {127, 30, 90, 180, 15, 1.0f, 22, 16, "CIRCUIT"},
-    {0, 0, 128, 255, 24, 1.0f, 18, 25, "PIXEL"},
-    {106, 50, 200, 200, 18, 1.0f, 30, 19, "GLITCH"},
-    // ── ORGANIC ──────────────────────────────────────────────────────────────
-    {240, 30, 10, 80, 5, 4.0f, 3, 5, "DREAM"},
-    {200, 10, 0, 40, 4, 4.0f, 4, 7, "CLOUDS"},
-    {85, 0, 50, 100, 8, 2.0f, 11, 8, "MARBLE"},
-    {255, 15, 20, 130, 6, 2.0f, 6, 12, "SILK"},
-    {170, 5, 15, 120, 8, 2.0f, 4, 18, "AURORA"},
-    // ── PSYCHEDELIC ──────────────────────────────────────────────────────────
-    // HYPNO: ACID base — 5x slower, 3x zoomed in, palette-repeating dense ripple
-    {42, 100, 60, 255, 24, 0.03f, 4, 3, "HYPNO"},
-    {42, 100, 60, 230, 18, 1.0f, 20, 14, "ACID"},
-    {42, 0, 0, 200, 10, 1.0f, 8, 11, "RAINBOW"},
-    {127, 60, 170, 240, 20, 1.0f, 28, 21, "PRISM"},
-    {255, 120, 140, 255, 24, 1.0f, 32, 23, "DISCO"},
-    // ── DARK / MOODY ─────────────────────────────────────────────────────────
-    {85, 0, 60, 100, 6, 2.0f, 12, 7, "SMOOTHIE"},
-    {42, 0, 200, 60, 8, 0.05f, 5, 8, "BLOOD"},
-    {35, 0, 0, 50, 4, 4.0f, 7, 9, "DEEP"},
-    {0, 0, 180, 90, 6, 2.0f, 9, 6, "SMOKE"},
-    {85, 40, 80, 130, 8, 0.1f, 14, 10, "DECAY"},
+    // ── HYPNOTIC — near-static, 11–14 palette cycles, extreme zoom-in ────────
+    {42,  100, 60, 130, 55, 0.010f, 0.10f, 0.06f, "HYPNO"},
+    {170,  30, 30, 110, 48, 0.012f, 0.13f, 0.08f, "VOID"},
+    {85,   60, 90, 120, 52, 0.014f, 0.08f, 0.05f, "ABYSS"},
+    {200,  80,150, 105, 44, 0.018f, 0.16f, 0.10f, "TRANCE"},
+    // ── DREAM — very slow drift, 6–9 cycles, deep zoom-in ────────────────────
+    {42,    0, 40, 140, 36, 0.040f, 0.50f, 0.31f, "LAVA"},
+    {85,   40, 80, 135, 32, 0.060f, 0.70f, 0.43f, "DECAY"},
+    {170,   0, 10, 135, 28, 0.050f, 0.40f, 0.25f, "GLACIER"},
+    {127, 180, 20, 125, 24, 0.040f, 0.62f, 0.38f, "NEBULA"},
+    {255,  60,100, 140, 32, 0.055f, 0.52f, 0.32f, "SILK"},
+    {213, 120, 80, 130, 28, 0.050f, 0.31f, 0.19f, "DUSK"},
+    // ── ORGANIC — gentle flow, 4–6 cycles, moderate zoom ─────────────────────
+    {42,   40,  0, 185, 24, 0.100f, 2.0f,  1.2f,  "EMBER"},
+    {170,  10, 20, 175, 20, 0.150f, 3.1f,  1.9f,  "AURORA"},
+    {85,    0, 50, 165, 20, 0.100f, 2.5f,  1.5f,  "MARBLE"},
+    {42,  200, 30, 175, 28, 0.080f, 1.0f,  0.62f, "BLOOD"},
+    {127,  90, 70, 170, 18, 0.200f, 4.0f,  2.5f,  "FROST"},
+    {255,  20, 15, 180, 22, 0.120f, 1.8f,  1.1f,  "DREAM"},
+    // ── VIVID — active navigation, 4–6 cycles, natural–zoomed-out ────────────
+    {42,    0,  0, 220, 20, 1.0f,   8.0f,  5.0f,  "RAINBOW"},
+    {127,   0,  0, 240, 24, 1.0f,  15.0f,  9.3f,  "MOSAIC"},
+    {170,   0,  5, 200, 16, 2.0f,   6.0f,  9.7f,  "ARCTIC"},
+    {42,  100, 60, 230, 20, 1.0f,  20.0f, 12.4f,  "ACID"},
+    {255, 120,140, 255, 24, 1.0f,  32.0f, 19.8f,  "DISCO"},
 };
 
 const int NUM_PRESETS = sizeof(presets) / sizeof(presets[0]);
@@ -240,17 +227,10 @@ IRAM_ATTR void renderFrame()
             const uint8_t bot = lerp8by8(row1[mx], row1[mx + 1], sub_fx);
             uint8_t v = lerp8by8(top, bot, sub_fy);
 
-            if (ra)
-            {
-                const uint8_t ripple = (uint8_t)(((uint16_t)sin8((uint8_t)(ox * rf + oy * (rf >> 1) + tc * 2)) +
-                                                  sin8((uint8_t)(ox * (rf >> 1) + oy * rf + tc * 3)) +
-                                                  sin8((uint8_t)((ox + oy) * rf + tc))) /
-                                                 3);
-                v = (uint8_t)(v + scale8(ripple, ra));
-            }
-
+            // palette tiled rf/4 times over the noise range, scrolled by time
+            const uint8_t palIdx = (uint8_t)((uint16_t)v * rf / 4 + po + scale8(tc, ra));
             pixels[ox + W * oy] = ColorFromPalette(shiftedPalette,
-                                                   v + po, 255, LINEARBLEND);
+                                                   palIdx, 255, LINEARBLEND);
         }
     }
 }
@@ -325,8 +305,8 @@ void loop()
     // Navigation range shrinks with zoom so the window always stays inside the map.
     // halfRange = (MAP_W - W*zoom) / 2  →  origin oscillates 0..2*halfRange
     const int halfRange = max(1, (int)((MAP_W - W * p.zoom) * 0.5f));
-    const int32_t fpX = ((int32_t)halfRange << 8) + (int32_t)(sin16(navPhaseX) * ((long)halfRange << 8) / 32767L);
-    const int32_t fpY = ((int32_t)halfRange << 8) + (int32_t)(sin16(navPhaseY) * ((long)halfRange << 8) / 32767L);
+    const int32_t fpX = ((int32_t)halfRange << 8) + (int32_t)(sin16((uint16_t)navPhaseX) * ((long)halfRange << 8) / 32767L);
+    const int32_t fpY = ((int32_t)halfRange << 8) + (int32_t)(sin16((uint16_t)navPhaseY) * ((long)halfRange << 8) / 32767L);
     mapOriginX = fpX >> 8;
     mapOriginY = fpY >> 8;
     mapFracX = (uint8_t)(fpX & 0xFF);
