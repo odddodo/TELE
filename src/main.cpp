@@ -134,11 +134,11 @@ const Preset presets[] = {
     {127,  90, 70, 170, 18, 0.200f, 4.0f,  2.5f,  "FROST"},
     {255,  20, 15, 180, 22, 0.120f, 1.8f,  1.1f,  "DREAM"},
     // ── VIVID — active navigation, 4–6 cycles, natural–zoomed-out ────────────
-    {42,    0,  0, 220, 20, 1.0f,   8.0f,  5.0f,  "RAINBOW"},
-    {127,   0,  0, 240, 24, 1.0f,  15.0f,  9.3f,  "MOSAIC"},
-    {170,   0,  5, 200, 16, 2.0f,   6.0f,  9.7f,  "ARCTIC"},
-    {42,  100, 60, 230, 20, 1.0f,  20.0f, 12.4f,  "ACID"},
-    {255, 120,140, 255, 24, 1.0f,  32.0f, 19.8f,  "DISCO"},
+    {42,    0,  0, 200, 18, 0.8f,  5.0f,  3.1f,  "RAINBOW"},
+    {127,   0,  0, 190, 20, 1.5f,  7.0f,  4.3f,  "MOSAIC"},
+    {170,   0,  5, 190, 16, 2.5f,  5.0f,  3.1f,  "ARCTIC"},
+    {42,  100, 60, 220, 22, 1.0f, 12.0f,  7.4f,  "ACID"},
+    {255, 120,140, 240, 24, 1.2f, 18.0f, 11.1f,  "DISCO"},
 };
 
 const int NUM_PRESETS = sizeof(presets) / sizeof(presets[0]);
@@ -198,9 +198,9 @@ void buildNoiseMap()
 }
 
 // ══════════════════════════════════════════════════════ RENDER FRAME ══
-// Map lookup + additive sin-ripple overlay (wraps palette index).
-// Three traveling waves at different spatial/temporal frequencies
-// interfere to create complex moving color patterns over the static map.
+// 16-bit bilinear map lookup → palette index = v16 * rf/1024 + po + timeOff.
+// Sub-pixel fractions are preserved so the palette shifts by < 1 step per
+// sub-pixel move — no integer jumps regardless of rf or navigation speed.
 IRAM_ATTR void renderFrame()
 {
     const uint8_t po = presets[currentPreset].phaseOffset;
@@ -208,7 +208,12 @@ IRAM_ATTR void renderFrame()
     const uint8_t rf = presets[currentPreset].rippleFreq;
     // 8.8 fixed-point zoom: zoom*256, e.g. 0.03→7, 0.33→84, 1.0→256, 4.0→1024
     const uint16_t zoomFP = (uint16_t)(presets[currentPreset].zoom * 256.0f + 0.5f);
-    const uint8_t tc = (uint8_t)timeCounter;
+
+    // Smooth time scroll: accumulate ra per frame, step by 1 every 256/ra frames.
+    // uint8_t wrap at the period boundary is a single 1-step, not a ra-step flash.
+    static uint32_t palTimeAcc = 0;
+    palTimeAcc += ra;
+    const uint8_t timeOff = (uint8_t)(palTimeAcc >> 8);
 
     for (int oy = 0; oy < H; oy++)
     {
@@ -223,14 +228,16 @@ IRAM_ATTR void renderFrame()
             const uint32_t mx_fp = ((uint32_t)mapOriginX << 8) + mapFracX + (uint32_t)ox * zoomFP;
             const int mx = (int)(mx_fp >> 8);
             const uint8_t sub_fx = (uint8_t)(mx_fp & 0xFF);
-            const uint8_t top = lerp8by8(row0[mx], row0[mx + 1], sub_fx);
-            const uint8_t bot = lerp8by8(row1[mx], row1[mx + 1], sub_fx);
-            uint8_t v = lerp8by8(top, bot, sub_fy);
 
-            // palette tiled rf/4 times over the noise range, scrolled by time
-            const uint8_t palIdx = (uint8_t)((uint16_t)v * rf / 4 + po + scale8(tc, ra));
-            pixels[ox + W * oy] = ColorFromPalette(shiftedPalette,
-                                                   palIdx, 255, LINEARBLEND);
+            // 16-bit bilinear: preserves sub-pixel fractions lerp8by8 discards.
+            // top32/bot32 are 8.8 fixed-point (range 0..65280 = 255*256).
+            const uint32_t top32 = (uint32_t)row0[mx] * (256u - sub_fx) + (uint32_t)row0[mx + 1] * sub_fx;
+            const uint32_t bot32 = (uint32_t)row1[mx] * (256u - sub_fx) + (uint32_t)row1[mx + 1] * sub_fx;
+            const uint16_t v16 = (uint16_t)((top32 * (256u - sub_fy) + bot32 * sub_fy) >> 8);
+
+            // palette index: v16 (8.8 FP) * rf >> 10  ==  v * rf / 4 but sub-integer smooth
+            const uint8_t palIdx = (uint8_t)((((uint32_t)v16 * rf) >> 10) + po + timeOff);
+            pixels[ox + W * oy] = ColorFromPalette(shiftedPalette, palIdx, 255, LINEARBLEND);
         }
     }
 }
@@ -302,11 +309,17 @@ void loop()
     const Preset &p = presets[currentPreset];
     navPhaseX += p.navDX;
     navPhaseY += p.navDY;
+    // Keep phases in [0, 65536) so float precision stays sharp indefinitely.
+    if (navPhaseX >= 65536.0f) navPhaseX -= 65536.0f;
+    if (navPhaseY >= 65536.0f) navPhaseY -= 65536.0f;
     // Navigation range shrinks with zoom so the window always stays inside the map.
     // halfRange = (MAP_W - W*zoom) / 2  →  origin oscillates 0..2*halfRange
     const int halfRange = max(1, (int)((MAP_W - W * p.zoom) * 0.5f));
-    const int32_t fpX = ((int32_t)halfRange << 8) + (int32_t)(sin16((uint16_t)navPhaseX) * ((long)halfRange << 8) / 32767L);
-    const int32_t fpY = ((int32_t)halfRange << 8) + (int32_t)(sin16((uint16_t)navPhaseY) * ((long)halfRange << 8) / 32767L);
+    // sinf gives continuous sub-step position changes; sin16((uint16_t)phase) would
+    // hold the same value for 1/navDX frames then snap — visible every 2-3s at slow speeds.
+    static const float kRad = 2.0f * 3.14159265f / 65536.0f;
+    const int32_t fpX = ((int32_t)halfRange << 8) + (int32_t)(sinf(navPhaseX * kRad) * (float)(halfRange << 8));
+    const int32_t fpY = ((int32_t)halfRange << 8) + (int32_t)(sinf(navPhaseY * kRad) * (float)(halfRange << 8));
     mapOriginX = fpX >> 8;
     mapOriginY = fpY >> 8;
     mapFracX = (uint8_t)(fpX & 0xFF);
