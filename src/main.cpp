@@ -27,13 +27,22 @@ static float walkY      = 128.0f;
 static float walkAngle  = 0.0f;
 static float walkAngleT = 0.0f;
 
-static float probeAngle   = 0.0f;
-static float probeRadius  = 0.0f;
-static float probeAngleT  = 314.0f;
-static float probeRadiusT = 628.0f;
+static float probeDX        = 0.0f;   // Cartesian offset from primary (map px)
+static float probeDY        = 0.0f;
+static float probeWalkAngle = 0.5f;   // probe's own heading
+static float probeAngleT    = 314.0f; // noise time for probe heading
 
 static float probeX = 128.0f;
 static float probeY = 128.0f;
+
+// Mask walker: follows probe the same way probe follows primary (spring+noise walk).
+// maskDX/DY is Cartesian offset from probe; maskX/Y is the resolved torus position.
+static float maskDX        = 0.0f;
+static float maskDY        = 0.0f;
+static float maskWalkAngle = 1.0f;
+static float maskAngleT    = 777.0f;
+static float maskX         = 384.0f;  // absolute torus pos — updated each frame
+static float maskY         = 384.0f;
 
 // ══════════════════════════════════════════════════════════════════ STATE ══
 static CRGB pixels[W * H];
@@ -110,24 +119,10 @@ enum CombineMode : uint8_t {
 };
 
 // ═════════════════════════════════════════════════════════════════ PRESETS ══
-// All presets: CM_XOR, probeAmp=0.5, zoom=0.055, walkTurnRate=0.42,
-//              phaseOffset=100, rippleAmt=140, rippleFreq=32.
-//
-// probeAmp=0.5 map px ≈ 9 display px at zoom=0.055 — one noise-grain period,
-// the sweet spot for visible XOR grid interference.
-//
-// 5 speed tiers (log-spaced, 1× to 100×  slower):
-//   _1 = 1×    walkSpeed=0.00280  probeSpeed=0.0500
-//   _2 = 3×    walkSpeed=0.00084  probeSpeed=0.0150
-//   _3 = 10×   walkSpeed=0.00028  probeSpeed=0.0050
-//   _4 = 30×   walkSpeed=0.000084 probeSpeed=0.0015
-//   _5 = 100×  walkSpeed=0.000028 probeSpeed=0.0005
-//
-// 4 palettes:
-//   ZEB = Zebra  (0)   — monochrome, sharpest grid contrast
-//   HLO = Hello  (42)  — rainbow
-//   XGA = XGA    (127) — black/yellow/magenta/cyan
-//   ARC = Arctic (170) — white/blue/red/gold
+// Diagnostic variants of X2B exploring mask-walker hue-island parameters.
+// Mask walker follows probe via the same spring+noise-heading mechanism as
+// probe follows primary. maskDX/maskDY offset from probe → independent torus region.
+// maskAmt: palIdx shift strength. maskAmp: spring boundary (map px). maskSpeed: step.
 struct Preset
 {
     uint8_t     palIdx;
@@ -140,41 +135,40 @@ struct Preset
     float       walkTurnRate;
     float       probeAmp;
     float       probeSpeed;
+    uint8_t     maskAmt;    // max palIdx hue shift from mask [0=off, 80=gentle, 140=strong]
+    float       maskAmp;    // spring boundary: mask offset from probe (map px)
+    float       maskSpeed;  // mask step size (map px/frame); drives heading noise too
     CombineMode combineMode;
     const char *name;
 };
 
-// XOR grid study macro — varies palette (pi,hs), walkSpeed (ws), probeSpeed (ps).
-#define XS(pi, hs, ws, ps, n) {(pi),(hs), 100,   0, 32, 0.055f, (ws), 0.42f, 0.5f, (ps), CM_XOR, (n)}
+#define P(pi,hs,po,ra,rf,z,ws,wt,pa,ps,ma,mamp,mspd,n) \
+    {(pi),(hs),(po),(ra),(rf),(z),(ws),(wt),(pa),(ps),(ma),(mamp),(mspd),CM_XOR,(n)}
 
+// X2B variants — XGA/hueShift=180, zoom=0.045, same primary+probe as original X2B.
+// Parameters being explored:
+//   maskAmt  (ma):  palIdx hue shift strength  [0=off, 80=moderate, 140=strong]
+//   maskAmp  (mamp): spring boundary for mask offset from probe (map px)
+//              ≈0.20 map px = 4 dp (within fine-noise period — subtle modulation)
+//              ≈0.50 map px = 11 dp (one fine-noise period — phase-shifted blobs)
+//              ≈1.50 map px = 33 dp (independent from probe neighbourhood)
+//              ≈3.50 map px = 78 dp (fully independent torus region)
+//   maskSpeed (mspd): mask step size (map px/frame) — island travel speed
+// Columns: pi  hs  po ra  rf  zoom       ws       wt     pa     ps      ma  mamp   mspd
 const Preset presets[] = {
-    // ── Zebra — monochrome, sharpest contrast ─────────────────────────────────
-    XS(  0, 0, 0.002800f, 0.05000f, "ZEB_1"),
-    XS(  0, 0, 0.000840f, 0.01500f, "ZEB_2"),
-    XS(  0, 0, 0.000280f, 0.00500f, "ZEB_3"),
-    XS(  0, 0, 0.000084f, 0.00150f, "ZEB_4"),
-    XS(  0, 0, 0.000028f, 0.00050f, "ZEB_5"),
-    // ── Hello — rainbow ───────────────────────────────────────────────────────
-    XS( 42, 0, 0.002800f, 0.05000f, "HLO_1"),
-    XS( 42, 0, 0.000840f, 0.01500f, "HLO_2"),
-    XS( 42, 0, 0.000280f, 0.00500f, "HLO_3"),
-    XS( 42, 0, 0.000084f, 0.00150f, "HLO_4"),
-    XS( 42, 0, 0.000028f, 0.00050f, "HLO_5"),
-    // ── XGA — black / yellow / magenta / cyan ─────────────────────────────────
-    XS(127, 0, 0.002800f, 0.05000f, "XGA_1"),
-    XS(127, 0, 0.000840f, 0.01500f, "XGA_2"),
-    XS(127, 0, 0.000280f, 0.00500f, "XGA_3"),
-    XS(127, 0, 0.000084f, 0.00150f, "XGA_4"),
-    XS(127, 0, 0.000028f, 0.00050f, "XGA_5"),
-    // ── Arctic — white / blue / red / gold ────────────────────────────────────
-    XS(170, 0, 0.002800f, 0.05000f, "ARC_1"),
-    XS(170, 0, 0.000840f, 0.01500f, "ARC_2"),
-    XS(170, 0, 0.000280f, 0.00500f, "ARC_3"),
-    XS(170, 0, 0.000084f, 0.00150f, "ARC_4"),
-    XS(170, 0, 0.000028f, 0.00050f, "ARC_5"),
+    P(127,180,128,10,28,0.045f,0.006750f,0.38f,1.350f,0.1215f,  0, 0.00f,0.000f,"X2B-00"), // reference — mask off
+    P(127,180,128,10,28,0.045f,0.006750f,0.38f,1.350f,0.1215f, 40, 0.20f,0.005f,"X2B-A1"), // tight, subtle, crawl
+    P(127,180,128,10,28,0.045f,0.006750f,0.38f,1.350f,0.1215f, 80, 0.20f,0.008f,"X2B-A2"), // tight, moderate
+    P(127,180,128,10,28,0.045f,0.006750f,0.38f,1.350f,0.1215f, 80, 0.50f,0.010f,"X2B-B1"), // 1 period offset, moderate
+    P(127,180,128,10,28,0.045f,0.006750f,0.38f,1.350f,0.1215f,140, 0.50f,0.010f,"X2B-B2"), // 1 period offset, strong
+    P(127,180,128,10,28,0.045f,0.006750f,0.38f,1.350f,0.1215f, 80, 1.50f,0.010f,"X2B-C1"), // wide offset, moderate, slow
+    P(127,180,128,10,28,0.045f,0.006750f,0.38f,1.350f,0.1215f,140, 1.50f,0.010f,"X2B-C2"), // wide offset, strong, slow
+    P(127,180,128,10,28,0.045f,0.006750f,0.38f,1.350f,0.1215f,140, 1.50f,0.030f,"X2B-C3"), // wide offset, strong, faster
+    P(127,180,128,10,28,0.045f,0.006750f,0.38f,1.350f,0.1215f, 80, 3.50f,0.015f,"X2B-D1"), // far offset, moderate
+    P(127,180,128,10,28,0.045f,0.006750f,0.38f,1.350f,0.1215f,140, 3.50f,0.015f,"X2B-D2"), // far offset, strong
 };
 
-#undef XS
+#undef P
 
 const int NUM_PRESETS = sizeof(presets) / sizeof(presets[0]);
 int currentPreset = 0;
@@ -238,15 +232,50 @@ void advanceWalkers()
     walkX = fmodf(walkX + cosf(walkAngle) * p.walkSpeed + MAP_W, MAP_W);
     walkY = fmodf(walkY + sinf(walkAngle) * p.walkSpeed + MAP_H, MAP_H);
 
-    probeAngleT  += p.probeSpeed;
-    probeRadiusT += p.probeSpeed * 0.618f;
-    const int da  = (int)inoise8((uint16_t)probeAngleT) - 128;
-    probeAngle   += da * (3.14159f / 4096.0f);
-    const float targetR = (inoise8((uint16_t)probeRadiusT) / 255.0f) * p.probeAmp;
-    probeRadius  += (targetR - probeRadius) * 0.04f;
+    // Probe: smooth random walk in Cartesian offset from primary.
+    // Same noise-driven heading structure as the primary walker.
+    // Spring restoring force kicks in beyond probeAmp — soft boundary,
+    // no hard clamp, no orbital motion.
+    probeAngleT += p.probeSpeed * 0.618f;
+    const int dp = (int)inoise8((uint16_t)probeAngleT) - 128;
+    probeWalkAngle += dp * (p.probeSpeed * 3.14159f / 8192.0f);
+    float stepX = cosf(probeWalkAngle) * p.probeSpeed;
+    float stepY = sinf(probeWalkAngle) * p.probeSpeed;
 
-    probeX = fmodf(walkX + cosf(probeAngle) * probeRadius + MAP_W, MAP_W);
-    probeY = fmodf(walkY + sinf(probeAngle) * probeRadius + MAP_H, MAP_H);
+    const float dist2 = probeDX * probeDX + probeDY * probeDY;
+    if (dist2 > p.probeAmp * p.probeAmp) {
+        const float dist    = sqrtf(dist2);
+        const float excess  = dist - p.probeAmp;
+        const float restore = excess * (p.probeSpeed / (p.probeAmp + 1e-6f));
+        stepX -= (probeDX / dist) * restore;
+        stepY -= (probeDY / dist) * restore;
+    }
+
+    probeDX += stepX;
+    probeDY += stepY;
+    probeX = fmodf(walkX + probeDX + MAP_W, MAP_W);
+    probeY = fmodf(walkY + probeDY + MAP_H, MAP_H);
+
+    // Mask walker follows probe like probe follows primary — same spring mechanism.
+    if (p.maskAmt > 0 && p.maskAmp > 0.0f) {
+        maskAngleT += p.maskSpeed * 0.618f;
+        const int dm = (int)inoise8((uint16_t)maskAngleT) - 128;
+        maskWalkAngle += dm * (p.maskSpeed * 3.14159f / 8192.0f);
+        float mStepX = cosf(maskWalkAngle) * p.maskSpeed;
+        float mStepY = sinf(maskWalkAngle) * p.maskSpeed;
+        const float mdist2 = maskDX * maskDX + maskDY * maskDY;
+        if (mdist2 > p.maskAmp * p.maskAmp) {
+            const float mdist    = sqrtf(mdist2);
+            const float mexcess  = mdist - p.maskAmp;
+            const float mrestore = mexcess * (p.maskSpeed / (p.maskAmp + 1e-6f));
+            mStepX -= (maskDX / mdist) * mrestore;
+            mStepY -= (maskDY / mdist) * mrestore;
+        }
+        maskDX += mStepX;
+        maskDY += mStepY;
+    }
+    maskX = fmodf(probeX + maskDX + MAP_W, MAP_W);
+    maskY = fmodf(probeY + maskDY + MAP_H, MAP_H);
 }
 
 // ══════════════════════════════════════════════════════ RENDER FRAME ══
@@ -283,6 +312,14 @@ IRAM_ATTR void renderFrame()
     const int     pOriginY = (int)poyf;
     const uint8_t pFracY   = (uint8_t)((poyf - pOriginY) * 256.0f);
 
+    // Mask viewport origin — independent walk, same zoom as primary.
+    const float moxf = fmodf(maskX - (W * p.zoom) * 0.5f + MAP_W, MAP_W);
+    const float moyf = fmodf(maskY - (H * p.zoom) * 0.5f + MAP_H, MAP_H);
+    const int     mOriginX = (int)moxf;
+    const uint8_t mFracX   = (uint8_t)((moxf - mOriginX) * 256.0f);
+    const int     mOriginY = (int)moyf;
+    const uint8_t mFracY   = (uint8_t)((moyf - mOriginY) * 256.0f);
+
     for (int oy = 0; oy < H; oy++)
     {
         // Primary row pointers.
@@ -303,6 +340,19 @@ IRAM_ATTR void renderFrame()
             psub_fy = (uint8_t)(pmy_fp & 0xFF);
             prow0 = noiseMap + (pmy & MAP_MY) * MAP_W;
             prow1 = noiseMap + ((pmy + 1) & MAP_MY) * MAP_W;
+        }
+
+        // Mask row pointers — hue-shift islands; sampled every pixel when maskAmt > 0.
+        const uint8_t *mrow0 = nullptr;
+        const uint8_t *mrow1 = nullptr;
+        uint8_t msub_fy = 0;
+        if (p.maskAmt > 0)
+        {
+            const uint32_t mmy_fp = ((uint32_t)mOriginY << 8) + mFracY + (uint32_t)oy * zoomFP;
+            const int mmy = (int)(mmy_fp >> 8);
+            msub_fy = (uint8_t)(mmy_fp & 0xFF);
+            mrow0 = noiseMap + (mmy & MAP_MY) * MAP_W;
+            mrow1 = noiseMap + ((mmy + 1) & MAP_MY) * MAP_W;
         }
 
         for (int ox = 0; ox < W; ox++)
@@ -344,6 +394,19 @@ IRAM_ATTR void renderFrame()
                     default:      c = (uint8_t)((uint16_t)(v + pv) >> 1); break; // CM_ADD
                 }
                 palIdx = (uint8_t)(((uint16_t)c * rf >> 2) + po + timeOff);
+            }
+            // Per-pixel hue island from mask viewport.
+            if (p.maskAmt > 0)
+            {
+                const uint32_t mmx_fp = ((uint32_t)mOriginX << 8) + mFracX + (uint32_t)ox * zoomFP;
+                const int mmx = (int)(mmx_fp >> 8);
+                const uint8_t msub_fx = (uint8_t)(mmx_fp & 0xFF);
+                const int mmx0 = mmx & MAP_MX;
+                const int mmx1 = (mmx + 1) & MAP_MX;
+                const uint32_t mtop = (uint32_t)mrow0[mmx0] * (256u - msub_fx) + (uint32_t)mrow0[mmx1] * msub_fx;
+                const uint32_t mbot = (uint32_t)mrow1[mmx0] * (256u - msub_fx) + (uint32_t)mrow1[mmx1] * msub_fx;
+                const uint8_t maskPix = (uint8_t)(((mtop * (256u - msub_fy) + mbot * msub_fy) >> 8) >> 8);
+                palIdx += scale8(maskPix, p.maskAmt);
             }
             pixels[ox + W * oy] = ColorFromPalette(shiftedPalette, palIdx, 255, LINEARBLEND);
         }
@@ -425,9 +488,10 @@ void loop()
     if (now - lastMs >= 2000)
     {
         const Preset &p = presets[currentPreset];
-        Serial.printf("[%s] %.1f fps  walk(%.1f,%.1f) r=%.2f\n",
+        Serial.printf("[%s] %.1f fps  probe_r=%.2f  mask_r=%.2f\n",
                       p.name, 1000.f * frames / (now - lastMs),
-                      walkX, walkY, probeRadius);
+                      sqrtf(probeDX*probeDX + probeDY*probeDY),
+                      sqrtf(maskDX*maskDX + maskDY*maskDY));
         frames = 0;
         lastMs = now;
     }
