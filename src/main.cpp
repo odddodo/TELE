@@ -7,7 +7,7 @@
 #define H 64
 #define MAP_W 512
 #define MAP_H 512
-#define MAP_MX (MAP_W - 1)  // bitmask — MAP_W/H are powers of 2
+#define MAP_MX (MAP_W - 1)
 #define MAP_MY (MAP_H - 1)
 #define BTN_UP 6
 #define BTN_DOWN 7
@@ -17,27 +17,21 @@ static uint8_t addrPins[] = {45, 36, 48, 35, 21};
 Adafruit_Protomatter matrix(W, 4, 1, rgbPins, 5, addrPins, 2, 47, 14, true);
 
 // ══════════════════════════════════════════════════════════════ NOISE MAP ══
-// 512×512 uint8_t baked once at startup into PSRAM.
-// Diverse regions: large-scale blobs, fine grain, 1D-stretched stripes,
-// domain-warped swirls — blended spatially by two meta noise layers.
 // MAP_W/H = 512 = 2×256 (Perlin period) — all integer-scale inoise8 calls
 // tile seamlessly, so the map is a valid torus with no seam.
 uint8_t *noiseMap = nullptr;
 
 // ══════════════════════════════════════════════════════════ NAVIGATION ══
-// Primary: smooth random walk across the torus.
-// Probe:   polar offset from the primary, bounded to [0, probeAmp] map px.
 static float walkX      = 128.0f;
 static float walkY      = 128.0f;
-static float walkAngle  = 0.0f;   // heading in radians
-static float walkAngleT = 0.0f;   // noise-time for heading perturbation
+static float walkAngle  = 0.0f;
+static float walkAngleT = 0.0f;
 
 static float probeAngle   = 0.0f;
-static float probeRadius  = 0.0f;  // smoothed toward target each frame
-static float probeAngleT  = 314.0f; // different seed from walkAngleT
-static float probeRadiusT = 628.0f; // golden-ratio offset decouples from angle
+static float probeRadius  = 0.0f;
+static float probeAngleT  = 314.0f;
+static float probeRadiusT = 628.0f;
 
-// Derived each frame; available to renderFrame (and future two-walker render).
 static float probeX = 128.0f;
 static float probeY = 128.0f;
 
@@ -85,8 +79,6 @@ const uint8_t NUM_PALETTES = 7;
 const CRGBPalette16 palettes[NUM_PALETTES] = {
     Zebra, Hello, Smoothie, XGAColors, Arctic, Italy, HugMeColors};
 
-// Active palette — blend + hue-shift of adjacent palette pair.
-// Rebuilt once on preset load (not per frame).
 CRGBPalette16 shiftedPalette;
 
 void preparePalette(uint8_t palIdx, uint8_t hueShift)
@@ -106,57 +98,83 @@ void preparePalette(uint8_t palIdx, uint8_t hueShift)
     }
 }
 
+// ═══════════════════════════════════════════════════════════ COMBINE MODE ══
+// How the primary (v) and probe (pv) noise samples are mixed per pixel.
+// v and pv are both uint8_t [0,255].
+enum CombineMode : uint8_t {
+    CM_PRIMARY = 0,  // v only — probe not sampled
+    CM_MUL,          // scale8(v, pv) = v×pv/255  — bright only at intersections
+    CM_XOR,          // v ^ pv                    — digital interference / grid
+    CM_DIFF,         // |v − pv|                  — isocontours of the offset
+    CM_ADD,          // (v + pv) >> 1             — moiré superposition
+};
+
 // ═════════════════════════════════════════════════════════════════ PRESETS ══
-// palIdx:       0=Zebra  42=Hello  85=Smoothie  127=XGA  170=Arctic  213=Italy  255=HugMe
-// rippleAmt:    palette scroll speed — 0=frozen  100=gentle  200=fast  255=full
-// rippleFreq:   palette cycles over noise range: 4=1x  16=4x  32=8x  55=14x
-// zoom:         map px per display px: 0.01=100x-in  1.0=normal  2.5=2.5x-out
-// walkSpeed:    primary walker speed in map pixels per frame
-// walkTurnRate: noise-time advance/frame for heading — low=long arcs  high=jittery
-// probeAmp:     max probe radius in map pixels (0=same spot  200=far)
-// probeSpeed:   noise-time advance/frame for probe dynamics
+// All presets: CM_XOR, probeAmp=0.5, zoom=0.055, walkTurnRate=0.42,
+//              phaseOffset=100, rippleAmt=140, rippleFreq=32.
+//
+// probeAmp=0.5 map px ≈ 9 display px at zoom=0.055 — one noise-grain period,
+// the sweet spot for visible XOR grid interference.
+//
+// 5 speed tiers (log-spaced, 1× to 100×  slower):
+//   _1 = 1×    walkSpeed=0.00280  probeSpeed=0.0500
+//   _2 = 3×    walkSpeed=0.00084  probeSpeed=0.0150
+//   _3 = 10×   walkSpeed=0.00028  probeSpeed=0.0050
+//   _4 = 30×   walkSpeed=0.000084 probeSpeed=0.0015
+//   _5 = 100×  walkSpeed=0.000028 probeSpeed=0.0005
+//
+// 4 palettes:
+//   ZEB = Zebra  (0)   — monochrome, sharpest grid contrast
+//   HLO = Hello  (42)  — rainbow
+//   XGA = XGA    (127) — black/yellow/magenta/cyan
+//   ARC = Arctic (170) — white/blue/red/gold
 struct Preset
 {
-    uint8_t  palIdx;
-    uint8_t  hueShift;
-    uint8_t  phaseOffset;
-    uint8_t  rippleAmt;
-    uint8_t  rippleFreq;
-    float    zoom;
-    float    walkSpeed;
-    float    walkTurnRate;
-    float    probeAmp;
-    float    probeSpeed;
+    uint8_t     palIdx;
+    uint8_t     hueShift;
+    uint8_t     phaseOffset;
+    uint8_t     rippleAmt;
+    uint8_t     rippleFreq;
+    float       zoom;
+    float       walkSpeed;
+    float       walkTurnRate;
+    float       probeAmp;
+    float       probeSpeed;
+    CombineMode combineMode;
     const char *name;
 };
 
+// XOR grid study macro — varies palette (pi,hs), walkSpeed (ws), probeSpeed (ps).
+#define XS(pi, hs, ws, ps, n) {(pi),(hs), 100,   0, 32, 0.055f, (ws), 0.42f, 0.5f, (ps), CM_XOR, (n)}
+
 const Preset presets[] = {
-    // ── HYPNOTIC — near-static, 11–14 palette cycles, extreme zoom-in ────────
-    {42,  100, 60, 130, 55, 0.010f, 0.0005f, 0.20f,   8.0f, 0.20f, "HYPNO"},
-    {170,  30, 30, 110, 48, 0.012f, 0.0006f, 0.25f,  10.0f, 0.25f, "VOID"},
-    {85,   60, 90, 120, 52, 0.014f, 0.0004f, 0.15f,   6.0f, 0.18f, "ABYSS"},
-    {200,  80,150, 105, 44, 0.018f, 0.0008f, 0.30f,  12.0f, 0.30f, "TRANCE"},
-    // ── DREAM — very slow drift, 6–9 cycles, deep zoom-in ────────────────────
-    {42,    0, 40, 140, 36, 0.040f, 0.0025f, 0.40f,  20.0f, 0.35f, "LAVA"},
-    {85,   40, 80, 135, 32, 0.060f, 0.0035f, 0.50f,  25.0f, 0.40f, "DECAY"},
-    {170,   0, 10, 135, 28, 0.050f, 0.0020f, 0.35f,  18.0f, 0.30f, "GLACIER"},
-    {127, 180, 20, 125, 24, 0.040f, 0.0030f, 0.45f,  22.0f, 0.38f, "NEBULA"},
-    {255,  60,100, 140, 32, 0.055f, 0.0028f, 0.42f,  20.0f, 0.35f, "SILK"},
-    {213, 120, 80, 130, 28, 0.050f, 0.0022f, 0.38f,  16.0f, 0.32f, "DUSK"},
-    // ── ORGANIC — gentle flow, 4–6 cycles, moderate zoom ─────────────────────
-    {42,   40,  0, 185, 24, 0.100f, 0.010f,  0.80f,  40.0f, 0.60f, "EMBER"},
-    {170,  10, 20, 175, 20, 0.150f, 0.015f,  1.00f,  50.0f, 0.80f, "AURORA"},
-    {85,    0, 50, 165, 20, 0.100f, 0.012f,  0.90f,  45.0f, 0.70f, "MARBLE"},
-    {42,  200, 30, 175, 28, 0.080f, 0.008f,  0.70f,  35.0f, 0.55f, "BLOOD"},
-    {127,  90, 70, 170, 18, 0.200f, 0.020f,  1.20f,  60.0f, 1.00f, "FROST"},
-    {255,  20, 15, 180, 22, 0.120f, 0.010f,  0.85f,  40.0f, 0.65f, "DREAM"},
-    // ── VIVID — active navigation, natural–zoomed-out ────────────────────────
-    {42,    0,  0, 200, 18, 0.8f,   0.040f,  1.50f,  80.0f, 1.20f, "RAINBOW"},
-    {127,   0,  0, 190, 20, 1.5f,   0.070f,  2.00f, 100.0f, 1.50f, "MOSAIC"},
-    {170,   0,  5, 190, 16, 2.5f,   0.050f,  1.80f,  90.0f, 1.40f, "ARCTIC"},
-    {42,  100, 60, 220, 22, 1.0f,   0.100f,  3.00f, 150.0f, 2.00f, "ACID"},
-    {255, 120,140, 240, 24, 1.2f,   0.150f,  4.00f, 200.0f, 2.50f, "DISCO"},
+    // ── Zebra — monochrome, sharpest contrast ─────────────────────────────────
+    XS(  0, 0, 0.002800f, 0.05000f, "ZEB_1"),
+    XS(  0, 0, 0.000840f, 0.01500f, "ZEB_2"),
+    XS(  0, 0, 0.000280f, 0.00500f, "ZEB_3"),
+    XS(  0, 0, 0.000084f, 0.00150f, "ZEB_4"),
+    XS(  0, 0, 0.000028f, 0.00050f, "ZEB_5"),
+    // ── Hello — rainbow ───────────────────────────────────────────────────────
+    XS( 42, 0, 0.002800f, 0.05000f, "HLO_1"),
+    XS( 42, 0, 0.000840f, 0.01500f, "HLO_2"),
+    XS( 42, 0, 0.000280f, 0.00500f, "HLO_3"),
+    XS( 42, 0, 0.000084f, 0.00150f, "HLO_4"),
+    XS( 42, 0, 0.000028f, 0.00050f, "HLO_5"),
+    // ── XGA — black / yellow / magenta / cyan ─────────────────────────────────
+    XS(127, 0, 0.002800f, 0.05000f, "XGA_1"),
+    XS(127, 0, 0.000840f, 0.01500f, "XGA_2"),
+    XS(127, 0, 0.000280f, 0.00500f, "XGA_3"),
+    XS(127, 0, 0.000084f, 0.00150f, "XGA_4"),
+    XS(127, 0, 0.000028f, 0.00050f, "XGA_5"),
+    // ── Arctic — white / blue / red / gold ────────────────────────────────────
+    XS(170, 0, 0.002800f, 0.05000f, "ARC_1"),
+    XS(170, 0, 0.000840f, 0.01500f, "ARC_2"),
+    XS(170, 0, 0.000280f, 0.00500f, "ARC_3"),
+    XS(170, 0, 0.000084f, 0.00150f, "ARC_4"),
+    XS(170, 0, 0.000028f, 0.00050f, "ARC_5"),
 };
+
+#undef XS
 
 const int NUM_PRESETS = sizeof(presets) / sizeof(presets[0]);
 int currentPreset = 0;
@@ -168,9 +186,6 @@ static inline uint16_t to565(CRGB c)
 }
 
 // ══════════════════════════════════════════════════════════ MAP BUILD ══
-// 6 inoise8 calls/pixel × 512×512 ≈ 1.6M calls → ~3-5s at boot.
-// meta1 blends large-scale blobs ↔ fine grain
-// meta2 (quadratic response) fades in stripe or swirl at extremes
 void buildNoiseMap()
 {
     Serial.print("Building noise map...");
@@ -217,46 +232,42 @@ void advanceWalkers()
 {
     const Preset &p = presets[currentPreset];
 
-    // Primary: noise-driven heading accumulated each frame.
-    // Turn magnitude scales with walkSpeed so curvature radius (~20 map px)
-    // stays roughly constant regardless of speed.
     walkAngleT += p.walkTurnRate;
     const int dn = (int)inoise8((uint16_t)walkAngleT) - 128;
     walkAngle  += dn * (p.walkSpeed * 3.14159f / 8192.0f);
     walkX = fmodf(walkX + cosf(walkAngle) * p.walkSpeed + MAP_W, MAP_W);
     walkY = fmodf(walkY + sinf(walkAngle) * p.walkSpeed + MAP_H, MAP_H);
 
-    // Probe: polar offset from primary — angle does its own slow random walk,
-    // radius smoothly tracks a noise-driven target in [0, probeAmp].
-    // probeRadiusT advances at golden-ratio multiple of probeAngleT to
-    // keep angle and radius dynamics independent.
     probeAngleT  += p.probeSpeed;
     probeRadiusT += p.probeSpeed * 0.618f;
     const int da  = (int)inoise8((uint16_t)probeAngleT) - 128;
     probeAngle   += da * (3.14159f / 4096.0f);
     const float targetR = (inoise8((uint16_t)probeRadiusT) / 255.0f) * p.probeAmp;
-    probeRadius  += (targetR - probeRadius) * 0.04f;  // ~25-frame smooth approach
+    probeRadius  += (targetR - probeRadius) * 0.04f;
 
     probeX = fmodf(walkX + cosf(probeAngle) * probeRadius + MAP_W, MAP_W);
     probeY = fmodf(walkY + sinf(probeAngle) * probeRadius + MAP_H, MAP_H);
 }
 
 // ══════════════════════════════════════════════════════ RENDER FRAME ══
-// Viewport is centered on walkX/Y. Each pixel bilinearly samples the torus
-// noise map; torus wrap is a bitmask since MAP_W/H are powers of 2.
+// For CM_PRIMARY: palIdx = (v16 * rf >> 10) + po + timeOff  (sub-pixel smooth)
+// For others:     palIdx = (combine(v,pv) * rf >> 2) + po + timeOff
+//   where v = v16 >> 8 and pv is the 8-bit probe bilinear sample.
+//   (v16 * rf >> 10) == (v8 * rf >> 2) — same formula, integer v8.
 IRAM_ATTR void renderFrame()
 {
-    const Preset &p = presets[currentPreset];
-    const uint8_t po = p.phaseOffset;
-    const uint8_t ra = p.rippleAmt;
-    const uint8_t rf = p.rippleFreq;
+    const Preset &p   = presets[currentPreset];
+    const uint8_t po  = p.phaseOffset;
+    const uint8_t ra  = p.rippleAmt;
+    const uint8_t rf  = p.rippleFreq;
     const uint16_t zoomFP = (uint16_t)(p.zoom * 256.0f + 0.5f);
+    const CombineMode cm  = p.combineMode;
 
     static uint32_t palTimeAcc = 0;
     palTimeAcc += ra;
     const uint8_t timeOff = (uint8_t)(palTimeAcc >> 8);
 
-    // Viewport top-left in map space; +MAP_W ensures positive before fmodf.
+    // Primary viewport origin (top-left; walkX/Y is center).
     const float oxf = fmodf(walkX - (W * p.zoom) * 0.5f + MAP_W, MAP_W);
     const float oyf = fmodf(walkY - (H * p.zoom) * 0.5f + MAP_H, MAP_H);
     const int     originX = (int)oxf;
@@ -264,29 +275,76 @@ IRAM_ATTR void renderFrame()
     const int     originY = (int)oyf;
     const uint8_t fracY   = (uint8_t)((oyf - originY) * 256.0f);
 
+    // Probe viewport origin (same zoom, different center).
+    const float poxf = fmodf(probeX - (W * p.zoom) * 0.5f + MAP_W, MAP_W);
+    const float poyf = fmodf(probeY - (H * p.zoom) * 0.5f + MAP_H, MAP_H);
+    const int     pOriginX = (int)poxf;
+    const uint8_t pFracX   = (uint8_t)((poxf - pOriginX) * 256.0f);
+    const int     pOriginY = (int)poyf;
+    const uint8_t pFracY   = (uint8_t)((poyf - pOriginY) * 256.0f);
+
     for (int oy = 0; oy < H; oy++)
     {
+        // Primary row pointers.
         const uint32_t my_fp = ((uint32_t)originY << 8) + fracY + (uint32_t)oy * zoomFP;
         const int my = (int)(my_fp >> 8);
         const uint8_t sub_fy = (uint8_t)(my_fp & 0xFF);
-        // Torus row pointers — bitmask wraps at MAP_H boundary.
         const uint8_t *row0 = noiseMap + (my & MAP_MY) * MAP_W;
         const uint8_t *row1 = noiseMap + ((my + 1) & MAP_MY) * MAP_W;
 
+        // Probe row pointers — only used when cm != CM_PRIMARY.
+        const uint8_t *prow0 = nullptr;
+        const uint8_t *prow1 = nullptr;
+        uint8_t psub_fy = 0;
+        if (cm != CM_PRIMARY)
+        {
+            const uint32_t pmy_fp = ((uint32_t)pOriginY << 8) + pFracY + (uint32_t)oy * zoomFP;
+            const int pmy = (int)(pmy_fp >> 8);
+            psub_fy = (uint8_t)(pmy_fp & 0xFF);
+            prow0 = noiseMap + (pmy & MAP_MY) * MAP_W;
+            prow1 = noiseMap + ((pmy + 1) & MAP_MY) * MAP_W;
+        }
+
         for (int ox = 0; ox < W; ox++)
         {
+            // Primary bilinear sample.
             const uint32_t mx_fp = ((uint32_t)originX << 8) + fracX + (uint32_t)ox * zoomFP;
             const int mx = (int)(mx_fp >> 8);
             const uint8_t sub_fx = (uint8_t)(mx_fp & 0xFF);
-            // Torus column indices — bitmask wraps at MAP_W boundary.
             const int mx0 = mx & MAP_MX;
             const int mx1 = (mx + 1) & MAP_MX;
-
             const uint32_t top32 = (uint32_t)row0[mx0] * (256u - sub_fx) + (uint32_t)row0[mx1] * sub_fx;
             const uint32_t bot32 = (uint32_t)row1[mx0] * (256u - sub_fx) + (uint32_t)row1[mx1] * sub_fx;
             const uint16_t v16   = (uint16_t)((top32 * (256u - sub_fy) + bot32 * sub_fy) >> 8);
 
-            const uint8_t palIdx = (uint8_t)((((uint32_t)v16 * rf) >> 10) + po + timeOff);
+            uint8_t palIdx;
+            if (cm == CM_PRIMARY)
+            {
+                palIdx = (uint8_t)((((uint32_t)v16 * rf) >> 10) + po + timeOff);
+            }
+            else
+            {
+                // Probe bilinear sample.
+                const uint32_t pmx_fp = ((uint32_t)pOriginX << 8) + pFracX + (uint32_t)ox * zoomFP;
+                const int pmx = (int)(pmx_fp >> 8);
+                const uint8_t psub_fx = (uint8_t)(pmx_fp & 0xFF);
+                const int pmx0 = pmx & MAP_MX;
+                const int pmx1 = (pmx + 1) & MAP_MX;
+                const uint32_t ptop = (uint32_t)prow0[pmx0] * (256u - psub_fx) + (uint32_t)prow0[pmx1] * psub_fx;
+                const uint32_t pbot = (uint32_t)prow1[pmx0] * (256u - psub_fx) + (uint32_t)prow1[pmx1] * psub_fx;
+                const uint8_t pv = (uint8_t)(((ptop * (256u - psub_fy) + pbot * psub_fy) >> 8) >> 8);
+                const uint8_t v  = (uint8_t)(v16 >> 8);
+
+                uint8_t c;
+                switch (cm)
+                {
+                    case CM_MUL:  c = scale8(v, pv);                      break;
+                    case CM_XOR:  c = v ^ pv;                             break;
+                    case CM_DIFF: c = (v > pv) ? (v - pv) : (pv - v);    break;
+                    default:      c = (uint8_t)((uint16_t)(v + pv) >> 1); break; // CM_ADD
+                }
+                palIdx = (uint8_t)(((uint16_t)c * rf >> 2) + po + timeOff);
+            }
             pixels[ox + W * oy] = ColorFromPalette(shiftedPalette, palIdx, 255, LINEARBLEND);
         }
     }
@@ -298,7 +356,8 @@ void loadPreset(int idx)
     currentPreset = idx;
     const Preset &p = presets[idx];
     preparePalette(p.palIdx, p.hueShift);
-    Serial.printf("► %s (%d/%d)\n", p.name, idx + 1, NUM_PRESETS);
+    Serial.printf("► %s (%d/%d)  cm=%d amp=%.2f\n",
+                  p.name, idx + 1, NUM_PRESETS, (int)p.combineMode, p.probeAmp);
 }
 
 void checkButtons()
@@ -366,9 +425,9 @@ void loop()
     if (now - lastMs >= 2000)
     {
         const Preset &p = presets[currentPreset];
-        Serial.printf("[%s] %.1f fps  walk(%.0f,%.0f) probe(%.0f,%.0f) r=%.1f\n",
+        Serial.printf("[%s] %.1f fps  walk(%.1f,%.1f) r=%.2f\n",
                       p.name, 1000.f * frames / (now - lastMs),
-                      walkX, walkY, probeX, probeY, probeRadius);
+                      walkX, walkY, probeRadius);
         frames = 0;
         lastMs = now;
     }
