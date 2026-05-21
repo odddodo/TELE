@@ -239,26 +239,22 @@ void advanceWalkers()
     walkX = fmodf(walkX + cosf(walkAngle) * p.walkSpeed + MAP_W, MAP_W);
     walkY = fmodf(walkY + sinf(walkAngle) * p.walkSpeed + MAP_H, MAP_H);
 
-    // Probe: smooth random walk in Cartesian offset from primary.
-    // Spring restoring force kicks in beyond probeAmp — no orbital motion.
+    // Probe: random walk inside a disk of radius probeAmp centered on primary.
+    // Hard clamp replaces the spring to prevent resonant oscillation.
     probeAngleT += p.probeSpeed * 0.618f;
     const int dp = (int)inoise8((uint16_t)probeAngleT) - 128;
     probeWalkAngle += dp * (p.probeSpeed * 3.14159f / 8192.0f);
-    float stepX = cosf(probeWalkAngle) * p.probeSpeed;
-    float stepY = sinf(probeWalkAngle) * p.probeSpeed;
+    probeDX += cosf(probeWalkAngle) * p.probeSpeed;
+    probeDY += sinf(probeWalkAngle) * p.probeSpeed;
 
     const float dist2 = probeDX * probeDX + probeDY * probeDY;
     if (dist2 > p.probeAmp * p.probeAmp)
     {
-        const float dist = sqrtf(dist2);
-        const float excess = dist - p.probeAmp;
-        const float restore = excess * (p.probeSpeed / (p.probeAmp + 1e-6f));
-        stepX -= (probeDX / dist) * restore;
-        stepY -= (probeDY / dist) * restore;
+        const float inv = p.probeAmp / sqrtf(dist2);
+        probeDX *= inv;
+        probeDY *= inv;
     }
 
-    probeDX += stepX;
-    probeDY += stepY;
     probeX = fmodf(walkX + probeDX + MAP_W, MAP_W);
     probeY = fmodf(walkY + probeDY + MAP_H, MAP_H);
 }
