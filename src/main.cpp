@@ -2,450 +2,304 @@
 #include <Adafruit_Protomatter.h>
 #include <FastLED.h>
 
-// ═══════════════════════════════════════════════════════════════ HARDWARE ══
-#define W 64
-#define H 64
-#define MAP_W 512
-#define MAP_H 512
-#define MAP_MX (MAP_W - 1)
-#define MAP_MY (MAP_H - 1)
-#define BTN_UP 6
-#define BTN_DOWN 7
+// ─── hardware ─────────────────────────────────────────────────────────────────
+#define W        64
+#define H        64
+#define BTN_UP    6
+#define BTN_DOWN  7
 
-static uint8_t rgbPins[] = {42, 41, 40, 38, 39, 37};
+static uint8_t rgbPins[]  = {42, 41, 40, 38, 39, 37};
 static uint8_t addrPins[] = {45, 36, 48, 35, 21};
 Adafruit_Protomatter matrix(W, 4, 1, rgbPins, 5, addrPins, 2, 47, 14, true);
 
-// ══════════════════════════════════════════════════════════════ NOISE MAP ══
-// MAP_W/H = 512 = 2×256 (Perlin period) — all integer-scale inoise8 calls
-// tile seamlessly, so the map is a valid torus with no seam.
-uint8_t *noiseMap = nullptr;
+// ─── state ────────────────────────────────────────────────────────────────────
+struct Chan { float nsclx, nscly, tscl, sinscl, mask, steepness; };
+static Chan     channels[3];
+static CRGB     pixels[W * H];
+static uint32_t time_counter = 0;
 
-// ══════════════════════════════════════════════════════════ NAVIGATION ══
-static float walkX = 128.0f;
-static float walkY = 128.0f;
-static float walkAngle = 0.0f;
-static float walkAngleT = 0.0f;
+static uint8_t       phaseOffset   = 0;
+static uint8_t       hueShiftINDX  = 0;
+static CRGBPalette16 blendedPalette;
+static CRGBPalette16 shiftedPalette;
 
-static float probeDX = 0.0f; // Cartesian offset from primary (map px)
-static float probeDY = 0.0f;
-static float probeWalkAngle = 0.5f;
-static float probeAngleT = 314.0f;
+// ─── palettes ─────────────────────────────────────────────────────────────────
+// blend index: 0=Zebra  42=Hello  85=Smoothie  127=XGA  170=Arctic  213=Italy  255=HugMe
+static const CRGBPalette16 Zebra = CRGBPalette16(
+    CRGB::Black,       CRGB::GhostWhite,  CRGB::DarkGrey,    CRGB::Black,
+    CRGB::GhostWhite,  CRGB::DarkGrey,    CRGB::Black,       CRGB::GhostWhite,
+    CRGB::Black,       CRGB::DarkGrey,    CRGB::Black,       CRGB::DarkGrey,
+    CRGB::Black,       CRGB::DarkGrey,    CRGB::Black,       CRGB::DarkGrey);
+static const CRGBPalette16 Hello = CRGBPalette16(
+    CRGB::Red,         CRGB::Orange,      CRGB::Yellow,      CRGB::DarkGreen,
+    CRGB::DarkBlue,    CRGB::Purple,      CRGB::Red,         CRGB::Orange,
+    CRGB::Yellow,      CRGB::DarkGreen,   CRGB::DarkBlue,    CRGB::Purple,
+    CRGB::Red,         CRGB::Orange,      CRGB::Yellow,      CRGB::DarkGreen);
+static const CRGBPalette16 Smoothie = CRGBPalette16(
+    CRGB::DarkOrchid,  CRGB::Olive,       CRGB::DarkGoldenrod, CRGB::Black,
+    CRGB::DarkMagenta, CRGB::DarkKhaki,   CRGB::RoyalBlue,   CRGB::Black,
+    CRGB::DarkOrchid,  CRGB::Olive,       CRGB::DarkGoldenrod, CRGB::Black,
+    CRGB::DarkMagenta, CRGB::DarkKhaki,   CRGB::RoyalBlue,   CRGB::Black);
+static const CRGBPalette16 XGAColors = CRGBPalette16(
+    CRGB::Black,       CRGB::Yellow,      CRGB::Magenta,     CRGB::Cyan,
+    CRGB::Black,       CRGB::Yellow,      CRGB::Magenta,     CRGB::Cyan,
+    CRGB::Black,       CRGB::Yellow,      CRGB::Magenta,     CRGB::Cyan,
+    CRGB::Black,       CRGB::Yellow,      CRGB::Magenta,     CRGB::Cyan);
+static const CRGBPalette16 Arctic = CRGBPalette16(
+    CRGB::White,       CRGB::Blue,        CRGB::Red,         CRGB::White,
+    CRGB::Blue,        CRGB::Red,         CRGB::DarkBlue,    CRGB::Gold,
+    CRGB::DarkBlue,    CRGB::Gold,        CRGB::DarkBlue,    CRGB::Gold,
+    CRGB::White,       CRGB::Blue,        CRGB::Red,         CRGB::Gold);
+static const CRGBPalette16 Italy = CRGBPalette16(
+    CRGB::GhostWhite,  CRGB::Red,         CRGB::Green,       CRGB::Black,
+    CRGB::GhostWhite,  CRGB::Red,         CRGB::Green,       CRGB::Black,
+    CRGB::WhiteSmoke,  CRGB::Blue,        CRGB::WhiteSmoke,  CRGB::Blue,
+    CRGB::WhiteSmoke,  CRGB::Blue,        CRGB::WhiteSmoke,  CRGB::Blue);
+static const CRGBPalette16 HugMeColors = CRGBPalette16(
+    CRGB::HotPink,     CRGB::Olive,       CRGB::YellowGreen, CRGB::Black,
+    CRGB::DarkSalmon,  CRGB::Olive,       CRGB::DarkBlue,    CRGB::Black,
+    CRGB::DarkOrchid,  CRGB::Olive,       CRGB::DarkGoldenrod, CRGB::Black,
+    CRGB::DarkMagenta, CRGB::DarkKhaki,   CRGB::RoyalBlue,   CRGB::Black);
 
-static float probeX = 128.0f;
-static float probeY = 128.0f;
+static const uint8_t NUM_PALETTES = 7;
+static const CRGBPalette16 palettes[NUM_PALETTES] = {
+    Zebra, Hello, Smoothie, XGAColors, Arctic, Italy, HugMeColors
+};
 
-// ══════════════════════════════════════════════════════════════════ STATE ══
-static CRGB pixels[W * H];
+// ─── convolution kernels ──────────────────────────────────────────────────────
+static float embossKernel[3][3] = {{-2,-1, 0},{-1, 1, 1},{ 0, 1, 2}};
+static float blurKernel[3][3]   = {{1/9.f,1/9.f,1/9.f},
+                                   {1/9.f,1/9.f,1/9.f},
+                                   {1/9.f,1/9.f,1/9.f}};
 
-// ═════════════════════════════════════════════════════════════════ PALETTES ══
-const CRGBPalette16 Zebra = CRGBPalette16(
-    CRGB::Black, CRGB::GhostWhite, CRGB::DarkGrey, CRGB::Black,
-    CRGB::GhostWhite, CRGB::DarkGrey, CRGB::Black, CRGB::GhostWhite,
-    CRGB::Black, CRGB::DarkGrey, CRGB::Black, CRGB::DarkGrey,
-    CRGB::Black, CRGB::DarkGrey, CRGB::Black, CRGB::DarkGrey);
-const CRGBPalette16 Hello = CRGBPalette16(
-    CRGB::Red, CRGB::Orange, CRGB::Yellow, CRGB::DarkGreen,
-    CRGB::DarkBlue, CRGB::Purple, CRGB::Red, CRGB::Orange,
-    CRGB::Yellow, CRGB::DarkGreen, CRGB::DarkBlue, CRGB::Purple,
-    CRGB::Red, CRGB::Orange, CRGB::Yellow, CRGB::DarkGreen);
-const CRGBPalette16 Smoothie = CRGBPalette16(
-    CRGB::DarkOrchid, CRGB::Olive, CRGB::DarkGoldenrod, CRGB::Black,
-    CRGB::DarkMagenta, CRGB::DarkKhaki, CRGB::RoyalBlue, CRGB::Black,
-    CRGB::DarkOrchid, CRGB::Olive, CRGB::DarkGoldenrod, CRGB::Black,
-    CRGB::DarkMagenta, CRGB::DarkKhaki, CRGB::RoyalBlue, CRGB::Black);
-const CRGBPalette16 XGAColors = CRGBPalette16(
-    CRGB::Black, CRGB::Yellow, CRGB::Magenta, CRGB::Cyan,
-    CRGB::Black, CRGB::Yellow, CRGB::Magenta, CRGB::Cyan,
-    CRGB::Black, CRGB::Yellow, CRGB::Magenta, CRGB::Cyan,
-    CRGB::Black, CRGB::Yellow, CRGB::Magenta, CRGB::Cyan);
-const CRGBPalette16 Arctic = CRGBPalette16(
-    CRGB::White, CRGB::Blue, CRGB::Red, CRGB::White,
-    CRGB::Blue, CRGB::Red, CRGB::DarkBlue, CRGB::Gold,
-    CRGB::DarkBlue, CRGB::Gold, CRGB::DarkBlue, CRGB::Gold,
-    CRGB::White, CRGB::Blue, CRGB::Red, CRGB::Gold);
-const CRGBPalette16 Italy = CRGBPalette16(
-    CRGB::GhostWhite, CRGB::Red, CRGB::Green, CRGB::Black,
-    CRGB::GhostWhite, CRGB::Red, CRGB::Green, CRGB::Black,
-    CRGB::WhiteSmoke, CRGB::Blue, CRGB::WhiteSmoke, CRGB::Blue,
-    CRGB::WhiteSmoke, CRGB::Blue, CRGB::WhiteSmoke, CRGB::Blue);
-const CRGBPalette16 HugMeColors = CRGBPalette16(
-    CRGB::HotPink, CRGB::Olive, CRGB::YellowGreen, CRGB::Black,
-    CRGB::DarkSalmon, CRGB::Olive, CRGB::DarkBlue, CRGB::Black,
-    CRGB::DarkOrchid, CRGB::Olive, CRGB::DarkGoldenrod, CRGB::Black,
-    CRGB::DarkMagenta, CRGB::DarkKhaki, CRGB::RoyalBlue, CRGB::Black);
+// ─── presets ──────────────────────────────────────────────────────────────────
+// ch[0]  warped noise :  nsclx, nscly, tscl, sinscl, mask, steepness
+// ch[1]  plain noise  :  nsclx, nscly, tscl, sinscl, mask, steepness
+// ch[2]  palette      :  {0, 0, 0, hueShift, palBlend, phaseOffset}
+// embossAmt / blurAmt :  0=skip, 1-255=uniform blend amount
 
-const uint8_t NUM_PALETTES = 7;
-const CRGBPalette16 palettes[NUM_PALETTES] = {
-    Zebra, Hello, Smoothie, XGAColors, Arctic, Italy, HugMeColors};
+struct Preset {
+    Chan    ch[3];
+    uint8_t embossAmt, blurAmt;
+    const char *name;
+};
 
-CRGBPalette16 shiftedPalette;
+// P(name, x0,y0,t0,s0,m0,k0,  x1,y1,t1,s1,m1,k1,  hs,bm,ph,  ea,ba)
+#define P(n,x0,y0,t0,s0,m0,k0,x1,y1,t1,s1,m1,k1,hs,bm,ph,ea,ba) \
+    {{{x0,y0,t0,s0,m0,k0},{x1,y1,t1,s1,m1,k1},{0,0,0,hs,bm,ph}},ea,ba,n}
 
-void preparePalette(uint8_t palIdx, uint8_t hueShift)
-{
-    float pos = (palIdx / 255.0f) * (NUM_PALETTES - 1);
-    uint8_t a = (uint8_t)pos;
-    uint8_t b = min(a + 1, (int)(NUM_PALETTES - 1));
-    uint8_t amt = (uint8_t)((pos - a) * 255);
-    CRGBPalette16 blended;
+static const Preset presets[] = {
+    // ── LAVA ─────────────────────────────────────────────────────────────────
+    P("LV1",  400,400,  1.5f,0.055f,  5, 15,  250,300,  2.0f,0.045f, 10,  5,   8, 42, 20,  60,100),
+    P("LV2",  500,500,  2.5f,0.060f,  8, 20,  300,350,  3.0f,0.050f, 12, 10,  10, 42, 40,  80, 80),
+    P("LV3",  350,450,  2.0f,0.050f, 10, 60,  200,250,  2.5f,0.045f,  8, 40,  20, 42, 60,  60,120),
+    P("MG1",  150,150,  0.8f,0.040f,  3,  8,  100,120,  1.0f,0.035f,  5,  4,   0, 42, 10,  40,140),
+    P("MG2",  600,200,  1.5f,0.055f,  5, 12,  150,500,  2.0f,0.045f,  8,  8,  30, 42, 30,  70, 90),
+    P("INF",  380,380,  2.2f,0.048f,  6, 18,  230,270,  2.8f,0.040f,  9,  8,   5, 42, 80, 200, 30),
+    P("SLG",  420,420,  1.8f,0.035f, 80, 12,  260,300,  2.3f,0.030f, 60,  6,   0, 42,  0, 100, 80),
+    P("CND",  400,400,  2.0f,0.052f,  5, 15,  250,300,  2.5f,0.042f, 10,  5,   0, 85,  0,  20,200),
+    P("PYR",  400,400, 15.0f,0.065f,  5, 15,  250,300, 18.0f,0.055f, 10,  5,  60, 42,100,  80, 60),
+    P("EMB",  450,450,  3.0f,0.070f, 15, 25,  280,320,  3.5f,0.060f, 18, 15,  15,255, 50, 180, 40),
+    // ── PLASMA ───────────────────────────────────────────────────────────────
+    P("PL1",  180,180, 15.0f,0.080f,  0,120,  140,140, 12.0f,0.070f,  0, 90,  60,128, 60,  80, 80),
+    P("PL2",  220,160, 18.0f,0.085f,  0,100,  160,220, 14.0f,0.075f,  0, 80,  90,127, 80, 100, 60),
+    P("TSL",  300,300, 40.0f,0.090f,  0,160,  250,250, 35.0f,0.080f,  0,140, 120,127,  0, 120, 20),
+    P("SPK",  200,200, 20.0f,0.095f,  0,130,  170,170, 16.0f,0.090f,  0,110, 180,127, 40,  60, 40),
+    P("ARC",  180,180, 18.0f,0.085f,  0,200,  140,140, 14.0f,0.075f,  0,180,   0,127,100,  80, 80),
+    P("COR",  200,200,  2.0f,0.075f,  0,120,  160,160,  1.5f,0.065f,  0, 90, 100,127, 20,  60,100),
+    P("ION",  180,180, 15.0f,0.080f,  0,120,  140,140, 12.0f,0.070f,  0, 90,   0,128, 60,  40,180),
+    P("AND",  185,185, 17.0f,0.078f,  0,125,  145,145, 13.0f,0.068f,  0, 85,  60,127,128,  70, 90),
+    P("VLT",  180,180, 60.0f,0.080f,  0,120,  140,140, 50.0f,0.070f,  0, 90, 200,127, 40, 100, 30),
+    P("CTH",  200,200, 16.0f,0.082f,  0,115,  155,155, 13.0f,0.072f,  0, 95,  30,127, 90, 140, 50),
+    // ── ARCTIC ───────────────────────────────────────────────────────────────
+    P("AR1", 1200,600,  1.0f,0.030f, 30, 10,  800,1000, 0.8f,0.035f, 20,  8,   0,170,  5,  40,140),
+    P("IC1", 1800,300,  1.2f,0.025f, 25,  8,  500,1500, 0.9f,0.028f, 18,  5,   0,170, 20,  50,130),
+    P("FRS",  800,800,  1.5f,0.025f, 20, 15,  600,600,  1.2f,0.020f, 15, 10,  30,170, 10,  30,160),
+    P("GLC",  200,200,  0.3f,0.025f, 20,  5,  150,150,  0.2f,0.020f, 15,  3,   0,170,  0,  20,180),
+    P("TND", 1000,500,  1.0f,0.032f, 28, 10,  700,900,  0.8f,0.028f, 22,  7,  20,213, 30,  45,120),
+    P("BLZ", 1200,600, 12.0f,0.030f, 30, 10,  800,1000, 9.0f,0.035f, 20,  8,   0,170, 50,  60, 80),
+    P("PRM", 1200,600,  0.6f,0.022f, 40,  8,  800,1000, 0.5f,0.018f, 30,  5,   0,170,  0,  10,240),
+    P("AUR",  400,1600, 2.0f,0.040f, 15, 20,  300,1200, 1.5f,0.035f, 12, 15, 100, 85, 40,  40,100),
+    P("SNW",  900,900,  1.0f,0.028f, 25,  5,  700,700,  0.8f,0.024f, 18,  3,  10,170, 15,  25,160),
+    P("SLT", 1000,500,  3.0f,0.060f, 20,  8,  700,800,  2.5f,0.055f, 15,  5,   0,170, 35,  55,100),
+    // ── ORGANIC ──────────────────────────────────────────────────────────────
+    P("MSS",  500,500,  1.0f,0.045f, 20, 30,  350,400,  1.2f,0.040f, 15, 20,   0, 85, 10,  60,120),
+    P("FNG",  400,400,  2.5f,0.055f, 10,100,  300,350,  2.0f,0.050f,  8, 80,  40, 42, 20, 100, 60),
+    P("MYC",  600,600,  1.8f,0.050f, 15, 40,  450,500,  2.2f,0.045f, 12, 30,  20, 85, 30,  50,180),
+    P("SWP",  300,300,  0.6f,0.040f, 25, 20,  200,250,  0.5f,0.035f, 18, 12,  30, 85,  5,  40,150),
+    P("PET",  450,450,  1.2f,0.035f, 80, 15,  300,350,  1.0f,0.030f, 60, 10,   0, 85,  0,  70,100),
+    P("LCH",  800,400,  1.5f,0.050f, 18, 45,  400,900,  1.8f,0.045f, 14, 35,  10, 85, 25,  80, 80),
+    P("SPR",  550,550,  2.0f,0.055f, 12, 35,  380,420,  2.5f,0.050f, 10, 25,   0, 85, 40, 160, 40),
+    P("ALG",  400,400,  1.5f,0.048f, 15, 25,  280,320,  1.8f,0.042f, 12, 18,   0,213, 20,  50,130),
+    P("SOL",  350,350,  0.3f,0.045f, 18, 20,  250,280, 0.25f,0.040f, 14, 12,   0, 85,  8,  30,160),
+    P("BRK",  700,700,  2.0f,0.058f, 10, 20,  500,550,  2.5f,0.052f,  8, 15,  10, 85, 35,  90, 60),
+    // ── PSYCHEDELIC ──────────────────────────────────────────────────────────
+    P("HYP",  800,800,  8.0f,0.060f,  0, 50,  600,600, 10.0f,0.070f,  0, 80, 100,100,100, 100, 60),
+    P("ACD",  300,300, 20.0f,0.095f,  0, 80,  200,200, 25.0f,0.090f,  0, 60, 200,255,128,  80, 80),
+    P("TRP",  400,400, 12.0f,0.075f,  0,220,  300,300, 15.0f,0.065f,  0,200, 180, 42, 64, 200, 20),
+    P("DRM",  250,250,  0.5f,0.060f,  0, 40,  180,180,  0.4f,0.055f,  0, 30,  80,240, 20,  20,160),
+    P("VSN",  500,500, 10.0f,0.070f,  0, 60,  350,400,  8.0f,0.065f,  0, 50,  40,170, 80,  30,200),
+    P("KAL", 1500,200,  5.0f,0.080f,  0,150,  200,1500, 7.0f,0.075f,  0,130, 150,127, 50, 120, 50),
+    P("NEN",  200,200, 14.0f,0.080f,  0,100,  150,150, 11.0f,0.075f,  0, 80, 220, 42,200,  90, 70),
+    P("STR",  200,200, 80.0f,0.085f,  0,120,  160,160, 70.0f,0.080f,  0,100, 255,127,  0, 110, 30),
+    P("VRT",  350,350,  8.0f,0.070f,  0,240,  280,280,  6.0f,0.065f,  0,220,   0,100, 90, 130, 60),
+    P("ETH",  300,300,  4.0f,0.065f,  5, 60,  220,220,  3.5f,0.060f,  5, 50, 128,170, 50,  60,110),
+    // ── BONUS ────────────────────────────────────────────────────────────────
+    P("ZBR",  500,200,  5.0f,0.090f,  0,200,  200,500,  7.0f,0.080f,  0,180,   0,  0, 30, 160, 40),
+    P("MSC",  100,100,  3.0f,0.090f,  0, 30,   80, 80,  4.0f,0.080f,  0, 20,   0,127,  0, 200, 20),
+};
+#undef P
+
+static const int NUM_PRESETS = (int)(sizeof(presets) / sizeof(presets[0]));
+static int currentPreset = 0;
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
+static inline uint16_t to565(CRGB c) {
+    return ((uint16_t)(c.r & 0xF8) << 8) | ((uint16_t)(c.g & 0xFC) << 3) | (c.b >> 3);
+}
+
+// ─── convolution ──────────────────────────────────────────────────────────────
+static CRGB convolution(int x, int y, float kernel[3][3]) {
+    float r = 0, g = 0, b = 0;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            int xl = constrain(x + i - 1, 0, W - 1);
+            int yl = constrain(y + j - 1, 0, H - 1);
+            int loc = xl + W * yl;
+            r += pixels[loc].r * kernel[i][j];
+            g += pixels[loc].g * kernel[i][j];
+            b += pixels[loc].b * kernel[i][j];
+        }
+    }
+    return CRGB((uint8_t)constrain((int)r, 0, 255),
+                (uint8_t)constrain((int)g, 0, 255),
+                (uint8_t)constrain((int)b, 0, 255));
+}
+
+// ─── palette ──────────────────────────────────────────────────────────────────
+void blendMultiplePalettes() {
+    Chan &c      = channels[2];
+    phaseOffset  = (uint8_t)c.steepness;
+    hueShiftINDX = (uint8_t)c.sinscl;
+    float pos    = ((uint8_t)c.mask / 255.0f) * (NUM_PALETTES - 1);
+    uint8_t a    = (uint8_t)pos;
+    uint8_t b    = min(a + 1, NUM_PALETTES - 1);
+    uint8_t amt  = (uint8_t)((pos - a) * 255);
     for (int i = 0; i < 16; i++)
-        blended[i] = blend(palettes[a][i], palettes[b][i], amt);
-    for (int i = 0; i < 16; i++)
-    {
-        CHSV hsv = rgb2hsv_approximate(blended[i]);
-        hsv.hue += hueShift;
+        blendedPalette[i] = blend(palettes[a][i], palettes[b][i], amt);
+}
+
+void shiftPalette() {
+    for (int i = 0; i < 16; i++) {
+        CHSV hsv = rgb2hsv_approximate(blendedPalette[i]);
+        hsv.hue += hueShiftINDX;
         hsv2rgb_rainbow(hsv, shiftedPalette[i]);
     }
 }
 
-// ═══════════════════════════════════════════════════════════ COMBINE MODE ══
-enum CombineMode : uint8_t
-{
-    CM_PRIMARY = 0,
-    CM_MUL,
-    CM_XOR,
-    CM_DIFF,
-    CM_ADD,
-};
-
-// ═════════════════════════════════════════════════════════════════ PRESETS ══
-// 50 presets across 5 zoom tiers × 10 presets, all CM_XOR.
-// Calibration: walkSpeed = displayRate × zoom  (rates: slow≈0.02 med≈0.05 fast≈0.15)
-//              probeSpeed ≈ walkSpeed × 18
-//              probeAmp   = displayOffset × zoom  (tight≈5dp med≈12dp wide≈30dp)
-//              rippleAmt ≤ 20
-// Palettes: 0=Zebra 42=Hello 85=Smoothie 127=XGA 170=Arctic 213=Italy 255=HugMe
-struct Preset
-{
-    uint8_t palIdx, hueShift, phaseOffset, rippleAmt, rippleFreq;
-    float zoom, walkSpeed, walkTurnRate, probeAmp, probeSpeed;
-    CombineMode combineMode;
-    const char *name;
-};
-
-#define P(pi, hs, po, ra, rf, z, ws, wt, pa, ps, n) \
-    {(pi), (hs), (po), (ra), (rf), (z), (ws), (wt), (pa), (ps), CM_XOR, (n)}
-
-const Preset presets[] = {
-    // ── T1: HYPNOTIC — zoom 0.010–0.018 ──────────────────────────────────────
-    P(0, 0, 0, 0, 55, 0.010f, 0.000200f, 0.20f, 0.050f, 0.0036f, "Z1A"),
-    P(0, 60, 128, 8, 52, 0.016f, 0.000800f, 0.26f, 0.192f, 0.0144f, "Z1B"),
-    P(42, 0, 0, 5, 48, 0.012f, 0.000240f, 0.22f, 0.060f, 0.0043f, "H1A"),
-    P(42, 120, 200, 15, 52, 0.018f, 0.002700f, 0.30f, 0.540f, 0.0486f, "H1B"),
-    P(85, 40, 64, 8, 44, 0.014f, 0.000280f, 0.24f, 0.070f, 0.0050f, "S1A"),
-    P(127, 0, 0, 12, 55, 0.012f, 0.000600f, 0.22f, 0.144f, 0.0108f, "X1A"),
-    P(127, 80, 128, 5, 48, 0.018f, 0.002700f, 0.30f, 0.540f, 0.0486f, "X1B"),
-    P(170, 0, 0, 0, 52, 0.010f, 0.000500f, 0.20f, 0.120f, 0.0090f, "A1A"),
-    P(213, 60, 100, 15, 44, 0.016f, 0.000320f, 0.26f, 0.080f, 0.0058f, "I1A"),
-    P(255, 0, 0, 18, 55, 0.018f, 0.002700f, 0.30f, 0.216f, 0.0486f, "G1A"),
-    // ── T2: DREAM — zoom 0.040–0.060 ─────────────────────────────────────────
-    P(0, 0, 0, 0, 36, 0.040f, 0.000800f, 0.35f, 0.200f, 0.0144f, "Z2A"),
-    P(0, 60, 128, 8, 32, 0.055f, 0.002750f, 0.42f, 0.660f, 0.0495f, "Z2B"),
-    P(42, 0, 0, 10, 32, 0.050f, 0.001000f, 0.40f, 0.250f, 0.0180f, "H2A"),
-    P(42, 100, 200, 15, 28, 0.060f, 0.009000f, 0.45f, 1.800f, 0.1620f, "H2B"),
-    P(85, 40, 64, 5, 30, 0.045f, 0.002250f, 0.38f, 0.540f, 0.0405f, "S2A"),
-    P(85, 200, 128, 12, 28, 0.060f, 0.001200f, 0.45f, 0.300f, 0.0216f, "S2B"),
-    P(127, 0, 0, 12, 36, 0.040f, 0.002000f, 0.35f, 0.480f, 0.0360f, "X2A"),
-    P(127, 180, 128, 10, 28, 0.045f, 0.006750f, 0.38f, 1.350f, 0.1215f, "X2B"),
-    P(170, 0, 100, 8, 32, 0.050f, 0.001000f, 0.40f, 0.600f, 0.0180f, "A2A"),
-    P(213, 80, 0, 15, 24, 0.055f, 0.002750f, 0.42f, 0.660f, 0.0495f, "I2A"),
-    // ── T3: ORGANIC — zoom 0.100–0.200 ───────────────────────────────────────
-    P(0, 0, 0, 0, 24, 0.100f, 0.002000f, 0.70f, 0.500f, 0.0360f, "Z3A"),
-    P(0, 80, 128, 10, 22, 0.160f, 0.008000f, 0.90f, 1.920f, 0.1440f, "Z3B"),
-    P(42, 0, 0, 8, 20, 0.120f, 0.002400f, 0.75f, 0.600f, 0.0432f, "H3A"),
-    P(42, 160, 200, 16, 20, 0.200f, 0.030000f, 1.00f, 6.000f, 0.5400f, "H3B"),
-    P(85, 0, 64, 12, 24, 0.130f, 0.006500f, 0.80f, 1.560f, 0.1170f, "S3A"),
-    P(85, 200, 128, 20, 18, 0.200f, 0.004000f, 1.00f, 2.400f, 0.0720f, "S3B"),
-    P(127, 0, 0, 5, 20, 0.150f, 0.003000f, 0.85f, 0.750f, 0.0540f, "X3A"),
-    P(170, 0, 100, 18, 18, 0.180f, 0.027000f, 0.95f, 2.160f, 0.4860f, "A3A"),
-    P(213, 0, 0, 8, 22, 0.110f, 0.002200f, 0.72f, 0.550f, 0.0396f, "I3A"),
-    P(255, 60, 0, 14, 20, 0.150f, 0.022500f, 0.85f, 4.500f, 0.4050f, "G3A"),
-    // ── T4: VIVID — zoom 0.500–1.200 ─────────────────────────────────────────
-    P(0, 0, 0, 5, 18, 0.500f, 0.010000f, 1.20f, 2.500f, 0.1800f, "Z4A"),
-    P(0, 60, 128, 12, 20, 0.900f, 0.045000f, 1.70f, 5.400f, 0.8100f, "Z4B"),
-    P(42, 0, 0, 10, 18, 0.600f, 0.012000f, 1.30f, 3.000f, 0.2160f, "H4A"),
-    P(42, 140, 200, 18, 16, 1.000f, 0.150000f, 1.80f, 30.000f, 2.7000f, "H4B"),
-    P(85, 80, 64, 8, 20, 0.700f, 0.014000f, 1.40f, 3.500f, 0.2520f, "S4A"),
-    P(127, 0, 0, 15, 20, 0.800f, 0.040000f, 1.50f, 24.000f, 0.7200f, "X4A"),
-    P(127, 90, 128, 10, 18, 1.200f, 0.060000f, 2.00f, 6.000f, 1.0800f, "X4B"),
-    P(170, 0, 0, 6, 20, 0.600f, 0.030000f, 1.30f, 7.200f, 0.5400f, "A4A"),
-    P(213, 0, 100, 14, 16, 0.900f, 0.045000f, 1.70f, 27.000f, 0.8100f, "I4A"),
-    P(255, 40, 0, 20, 18, 1.000f, 0.020000f, 1.80f, 5.000f, 0.3600f, "G4A"),
-
-};
-
-#undef P
-
-const int NUM_PRESETS = sizeof(presets) / sizeof(presets[0]);
-int currentPreset = 0;
-
-// ═══════════════════════════════════════════════════════════════ HELPERS ══
-static inline uint16_t to565(CRGB c)
-{
-    return ((uint16_t)(c.r & 0xF8) << 8) | ((uint16_t)(c.g & 0xFC) << 3) | (c.b >> 3);
+static inline CRGB colorFromPal(uint8_t index) {
+    return ColorFromPalette(shiftedPalette, (uint8_t)(index + phaseOffset), 255, LINEARBLEND);
 }
 
-// ══════════════════════════════════════════════════════════ MAP BUILD ══
-void buildNoiseMap()
-{
-    Serial.print("Building noise map...");
-    const uint32_t t0 = millis();
+// ─── noise frame ──────────────────────────────────────────────────────────────
+IRAM_ATTR void generateNoiseFrame() {
+    Chan &cx = channels[0];
+    Chan &cy = channels[1];
+    const uint32_t tz0 = (uint32_t)(time_counter * cx.tscl);
+    const uint32_t tz1 = (uint32_t)(time_counter * cy.tscl);
 
-    for (int y = 0; y < MAP_H; y++)
-    {
-        const uint16_t my = (uint16_t)y;
-        for (int x = 0; x < MAP_W; x++)
-        {
-            const uint16_t mx = (uint16_t)x;
-
-            const uint8_t meta1 = inoise8(mx * 28, my * 28, 0);
-            const uint8_t meta2 = inoise8(mx * 18, my * 18, 99);
-            const uint8_t large = inoise8(mx * 55, my * 55, 111);
-            const uint8_t fine = inoise8(mx * 480, my * 480, 222);
-            const uint8_t stripe = inoise8(mx * 38, my * 750, 333);
-            const uint8_t swirl = inoise8(
-                (uint16_t)((int)(mx * 180) + (int)large - 128),
-                (uint16_t)((int)(my * 180) + (int)fine - 128), 444);
-
-            const uint8_t base = lerp8by8(large, fine, meta1);
-            const uint8_t w_stripe = lerp8by8(base, stripe, scale8(meta2, meta2));
-            const uint8_t v = lerp8by8(w_stripe, swirl, scale8(255 - meta2, 255 - meta2));
-
-            noiseMap[y * MAP_W + x] = v;
-        }
-
-        if ((y & 15) == 0)
-        {
-            const int barW = (y * W) / MAP_H;
-            matrix.fillScreen(0);
-            for (int bx = 0; bx < barW; bx++)
-                matrix.drawPixel(bx, 0, 0x7BEF);
-            matrix.show();
-        }
-    }
-
-    Serial.printf(" done in %lu ms\n", millis() - t0);
-}
-
-// ══════════════════════════════════════════════════════════ WALKERS ══
-void advanceWalkers()
-{
-    const Preset &p = presets[currentPreset];
-
-    // Primary: noise-driven heading; turn magnitude ∝ walkSpeed → constant curvature.
-    walkAngleT += p.walkTurnRate;
-    const int dn = (int)inoise8((uint16_t)walkAngleT) - 128;
-    walkAngle += dn * (p.walkSpeed * 3.14159f / 8192.0f);
-    walkX = fmodf(walkX + cosf(walkAngle) * p.walkSpeed + MAP_W, MAP_W);
-    walkY = fmodf(walkY + sinf(walkAngle) * p.walkSpeed + MAP_H, MAP_H);
-
-    // Probe: random walk inside a disk of radius probeAmp centered on primary.
-    // Hard clamp replaces the spring to prevent resonant oscillation.
-    probeAngleT += p.probeSpeed * 0.618f;
-    const int dp = (int)inoise8((uint16_t)probeAngleT) - 128;
-    probeWalkAngle += dp * (p.probeSpeed * 3.14159f / 8192.0f);
-    probeDX += cosf(probeWalkAngle) * p.probeSpeed;
-    probeDY += sinf(probeWalkAngle) * p.probeSpeed;
-
-    const float dist2 = probeDX * probeDX + probeDY * probeDY;
-    if (dist2 > p.probeAmp * p.probeAmp)
-    {
-        const float inv = p.probeAmp / sqrtf(dist2);
-        probeDX *= inv;
-        probeDY *= inv;
-    }
-
-    probeX = fmodf(walkX + probeDX + MAP_W, MAP_W);
-    probeY = fmodf(walkY + probeDY + MAP_H, MAP_H);
-}
-
-// ══════════════════════════════════════════════════════ RENDER FRAME ══
-// CM_PRIMARY:  palIdx = (v16 * rf >> 10) + po + timeOff
-// CM_XOR etc.: palIdx = (combine(v,pv) * rf >> 2) + po + timeOff
-IRAM_ATTR void renderFrame()
-{
-    const Preset &p = presets[currentPreset];
-    const uint8_t po = p.phaseOffset;
-    const uint8_t ra = p.rippleAmt;
-    const uint8_t rf = p.rippleFreq;
-    const uint16_t zoomFP = (uint16_t)(p.zoom * 256.0f + 0.5f);
-    const CombineMode cm = p.combineMode;
-
-    static uint32_t palTimeAcc = 0;
-    palTimeAcc += ra;
-    const uint8_t timeOff = (uint8_t)(palTimeAcc >> 8);
-
-    // Primary viewport origin (top-left; walkX/Y is center).
-    const float oxf = fmodf(walkX - (W * p.zoom) * 0.5f + MAP_W, MAP_W);
-    const float oyf = fmodf(walkY - (H * p.zoom) * 0.5f + MAP_H, MAP_H);
-    const int originX = (int)oxf;
-    const uint8_t fracX = (uint8_t)((oxf - originX) * 256.0f);
-    const int originY = (int)oyf;
-    const uint8_t fracY = (uint8_t)((oyf - originY) * 256.0f);
-
-    // Probe viewport origin (same zoom, different center).
-    const float poxf = fmodf(probeX - (W * p.zoom) * 0.5f + MAP_W, MAP_W);
-    const float poyf = fmodf(probeY - (H * p.zoom) * 0.5f + MAP_H, MAP_H);
-    const int pOriginX = (int)poxf;
-    const uint8_t pFracX = (uint8_t)((poxf - pOriginX) * 256.0f);
-    const int pOriginY = (int)poyf;
-    const uint8_t pFracY = (uint8_t)((poyf - pOriginY) * 256.0f);
-
-    for (int oy = 0; oy < H; oy++)
-    {
-        // Primary row pointers.
-        const uint32_t my_fp = ((uint32_t)originY << 8) + fracY + (uint32_t)oy * zoomFP;
-        const int my = (int)(my_fp >> 8);
-        const uint8_t sub_fy = (uint8_t)(my_fp & 0xFF);
-        const uint8_t *row0 = noiseMap + (my & MAP_MY) * MAP_W;
-        const uint8_t *row1 = noiseMap + ((my + 1) & MAP_MY) * MAP_W;
-
-        // Probe row pointers — only used when cm != CM_PRIMARY.
-        const uint8_t *prow0 = nullptr;
-        const uint8_t *prow1 = nullptr;
-        uint8_t psub_fy = 0;
-        if (cm != CM_PRIMARY)
-        {
-            const uint32_t pmy_fp = ((uint32_t)pOriginY << 8) + pFracY + (uint32_t)oy * zoomFP;
-            const int pmy = (int)(pmy_fp >> 8);
-            psub_fy = (uint8_t)(pmy_fp & 0xFF);
-            prow0 = noiseMap + (pmy & MAP_MY) * MAP_W;
-            prow1 = noiseMap + ((pmy + 1) & MAP_MY) * MAP_W;
-        }
-
-        for (int ox = 0; ox < W; ox++)
-        {
-            // Primary bilinear sample.
-            const uint32_t mx_fp = ((uint32_t)originX << 8) + fracX + (uint32_t)ox * zoomFP;
-            const int mx = (int)(mx_fp >> 8);
-            const uint8_t sub_fx = (uint8_t)(mx_fp & 0xFF);
-            const int mx0 = mx & MAP_MX;
-            const int mx1 = (mx + 1) & MAP_MX;
-            const uint32_t top32 = (uint32_t)row0[mx0] * (256u - sub_fx) + (uint32_t)row0[mx1] * sub_fx;
-            const uint32_t bot32 = (uint32_t)row1[mx0] * (256u - sub_fx) + (uint32_t)row1[mx1] * sub_fx;
-            const uint16_t v16 = (uint16_t)((top32 * (256u - sub_fy) + bot32 * sub_fy) >> 8);
-
-            uint8_t palIdx;
-            if (cm == CM_PRIMARY)
-            {
-                palIdx = (uint8_t)((((uint32_t)v16 * rf) >> 10) + po + timeOff);
-            }
-            else
-            {
-                // Probe bilinear sample.
-                const uint32_t pmx_fp = ((uint32_t)pOriginX << 8) + pFracX + (uint32_t)ox * zoomFP;
-                const int pmx = (int)(pmx_fp >> 8);
-                const uint8_t psub_fx = (uint8_t)(pmx_fp & 0xFF);
-                const int pmx0 = pmx & MAP_MX;
-                const int pmx1 = (pmx + 1) & MAP_MX;
-                const uint32_t ptop = (uint32_t)prow0[pmx0] * (256u - psub_fx) + (uint32_t)prow0[pmx1] * psub_fx;
-                const uint32_t pbot = (uint32_t)prow1[pmx0] * (256u - psub_fx) + (uint32_t)prow1[pmx1] * psub_fx;
-                const uint8_t pv = (uint8_t)(((ptop * (256u - psub_fy) + pbot * psub_fy) >> 8) >> 8);
-                const uint8_t v = (uint8_t)(v16 >> 8);
-
-                uint8_t c;
-                switch (cm)
-                {
-                case CM_MUL:
-                    c = scale8(v, pv);
-                    break;
-                case CM_XOR:
-                    c = v ^ pv;
-                    break;
-                case CM_DIFF:
-                    c = (v > pv) ? (v - pv) : (pv - v);
-                    break;
-                default:
-                    c = (uint8_t)((uint16_t)(v + pv) >> 1);
-                    break;
-                }
-                palIdx = (uint8_t)(((uint16_t)c * rf >> 2) + po + timeOff);
-            }
-            pixels[ox + W * oy] = ColorFromPalette(shiftedPalette, palIdx, 255, LINEARBLEND);
+    for (int x = 0; x < W; x++) {
+        int16_t wx = sin16(x * (uint16_t)cx.steepness);
+        int16_t wy = sin16(x * (uint16_t)cy.steepness);
+        for (int y = 0; y < H; y++) {
+            int16_t v = (int16_t)inoise16(
+                (uint32_t)(x * cx.nsclx + wx),
+                (uint32_t)(y * cx.nscly + wy), tz0);
+            int16_t k = (int16_t)inoise16(
+                (uint32_t)(x * cy.nsclx),
+                (uint32_t)(y * cy.nscly), tz1);
+            uint8_t v_res = (uint8_t)(v * cx.sinscl);
+            uint8_t k_res = (uint8_t)(k * cy.sinscl);
+            uint8_t palIdx = (uint8_t)(
+                ((uint16_t)(sin8(v_res) * cos8(v_res)) / (1 + (uint8_t)cx.mask) +
+                 (uint16_t)(sin8(k_res) * cos8(k_res)) / (1 + (uint8_t)cy.mask)) / 2);
+            pixels[x + W * y] = colorFromPal(palIdx);
         }
     }
 }
 
-// ════════════════════════════════════════════════════ PRESET / BUTTONS ══
-void loadPreset(int idx)
-{
+// ─── convolution pass ─────────────────────────────────────────────────────────
+void applySoftConvolution(float kernel[3][3], uint8_t blendAmt) {
+    if (blendAmt == 0) return;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            int loc = x + W * y;
+            pixels[loc] = blend(pixels[loc], convolution(x, y, kernel), blendAmt);
+        }
+}
+
+// ─── preset / buttons ─────────────────────────────────────────────────────────
+void loadPreset(int idx) {
     currentPreset = idx;
     const Preset &p = presets[idx];
-    preparePalette(p.palIdx, p.hueShift);
-    Serial.printf("► %s (%d/%d)  zoom=%.3f  amp=%.2f\n",
-                  p.name, idx + 1, NUM_PRESETS, p.zoom, p.probeAmp);
+    channels[0] = p.ch[0];
+    channels[1] = p.ch[1];
+    channels[2] = p.ch[2];
+    Serial.printf("► %s (%d/%d)  emb=%d  blur=%d\n",
+                  p.name, idx + 1, NUM_PRESETS, p.embossAmt, p.blurAmt);
 }
 
-void checkButtons()
-{
+void checkButtons() {
     static uint32_t lastPress = 0;
-    if (millis() - lastPress < 250)
-        return;
-    if (!digitalRead(BTN_UP))
-    {
+    if (millis() - lastPress < 250) return;
+    if (!digitalRead(BTN_UP)) {
         loadPreset((currentPreset + 1) % NUM_PRESETS);
         lastPress = millis();
-    }
-    else if (!digitalRead(BTN_DOWN))
-    {
+    } else if (!digitalRead(BTN_DOWN)) {
         loadPreset((currentPreset + NUM_PRESETS - 1) % NUM_PRESETS);
         lastPress = millis();
     }
 }
 
-// ══════════════════════════════════════════════════════════ SETUP / LOOP ══
-void setup()
-{
+// ─── setup / loop ─────────────────────────────────────────────────────────────
+void setup() {
     Serial.begin(115200);
     delay(500);
-    pinMode(BTN_UP, INPUT_PULLUP);
+    pinMode(BTN_UP,   INPUT_PULLUP);
     pinMode(BTN_DOWN, INPUT_PULLUP);
 
     ProtomatterStatus s = matrix.begin();
-    Serial.printf("matrix: %d  heap: %u  psram: %u\n",
-                  (int)s, ESP.getFreeHeap(), ESP.getFreePsram());
-    if (s != PROTOMATTER_OK)
-        for (;;)
-            ;
+    Serial.printf("matrix: %d  heap: %u\n", (int)s, ESP.getFreeHeap());
+    if (s != PROTOMATTER_OK) for (;;);
 
-    noiseMap = (uint8_t *)ps_malloc(MAP_W * MAP_H);
-    if (!noiseMap)
-    {
-        Serial.println("PSRAM alloc failed!");
-        for (;;)
-            ;
-    }
-
-    buildNoiseMap();
     loadPreset(0);
-
-    matrix.fillScreen(0);
-    matrix.show();
 }
 
-void loop()
-{
+void loop() {
     static uint32_t frames = 0;
     static uint32_t lastMs = 0;
 
+    const Preset &p = presets[currentPreset];
+
     checkButtons();
-    advanceWalkers();
-    renderFrame();
+    generateNoiseFrame();
+    applySoftConvolution(embossKernel, p.embossAmt);
+    applySoftConvolution(blurKernel,   p.blurAmt);
+    blendMultiplePalettes();
+    shiftPalette();
 
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
             matrix.drawPixel(x, y, to565(pixels[x + W * y]));
     matrix.show();
 
-    frames++;
+    time_counter++;
+    ++frames;
 
     const uint32_t now = millis();
-    if (now - lastMs >= 2000)
-    {
-        const Preset &p = presets[currentPreset];
-        Serial.printf("[%s] %.1f fps  walk(%.1f,%.1f)  probe_r=%.2f\n",
-                      p.name, 1000.f * frames / (now - lastMs),
-                      walkX, walkY, sqrtf(probeDX * probeDX + probeDY * probeDY));
+    if (now - lastMs >= 2000) {
+        Serial.printf("[%s] %.1f fps\n",
+                      p.name, 1000.0f * frames / (now - lastMs));
         frames = 0;
         lastMs = now;
     }
