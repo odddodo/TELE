@@ -7,21 +7,24 @@
 #define H 64
 #define BTN_UP 6
 #define BTN_DOWN 7
+#define CW 32
+#define CH 32
+#define BITPLANES 6
 
-static uint8_t rgbPins[] = {42, 41, 40, 38, 39, 37};
+static const float SHARP = 7.0f;
+
+static uint8_t rgbPins[]  = {42, 41, 40, 38, 39, 37};
 static uint8_t addrPins[] = {45, 36, 48, 35, 21};
 Adafruit_Protomatter matrix(W, 4, 1, rgbPins, 5, addrPins, 2, 47, 14, true);
 
-// ─── rendering config ─────────────────────────────────────────────────────────
-#define BITPLANES 6
-#define CW 32 // coarse noise grid width  (must divide evenly or <= W)
-#define CH 32 // coarse noise grid height
-
-static float coarse[CW * CH]; // noise values on coarse grid
-static uint16_t fb[W * H];    // RGB565 output (bilinear-upsampled)
+// ─── state ────────────────────────────────────────────────────────────────────
+static float    coarse[CW * CH];
+static uint16_t fb[W * H];
 static uint16_t paletteLUT[256];
-static float gtime = 0.0f;
-static float gSharp = 8.0f;
+static float    gtime = 0.0f;
+static float    qtime = 0.0f;
+static int      paletteIdx = 0;
+static float    potVal[4] = {0.5f, 0.5f, 0.5f, 0.5f};
 
 // ─── math helpers ─────────────────────────────────────────────────────────────
 static inline int ffloor(float x)
@@ -48,9 +51,9 @@ static float vnoise(float x, float y, float z, uint32_t s)
     int xi = ffloor(x), yi = ffloor(y), zi = ffloor(z);
     float xf = x - xi, yf = y - yi, zf = z - zi;
     float u = smoothf(xf), v = smoothf(yf), w = smoothf(zf);
-    float c000 = hash3(xi, yi, zi, s), c100 = hash3(xi + 1, yi, zi, s);
-    float c010 = hash3(xi, yi + 1, zi, s), c110 = hash3(xi + 1, yi + 1, zi, s);
-    float c001 = hash3(xi, yi, zi + 1, s), c101 = hash3(xi + 1, yi, zi + 1, s);
+    float c000 = hash3(xi, yi, zi, s),       c100 = hash3(xi + 1, yi, zi, s);
+    float c010 = hash3(xi, yi + 1, zi, s),   c110 = hash3(xi + 1, yi + 1, zi, s);
+    float c001 = hash3(xi, yi, zi + 1, s),   c101 = hash3(xi + 1, yi, zi + 1, s);
     float c011 = hash3(xi, yi + 1, zi + 1, s), c111 = hash3(xi + 1, yi + 1, zi + 1, s);
     float x00 = lerpf(c000, c100, u), x10 = lerpf(c010, c110, u);
     float x01 = lerpf(c001, c101, u), x11 = lerpf(c011, c111, u);
@@ -73,10 +76,8 @@ static inline float fbm(float x, float y, float z, uint32_t s)
 static inline float tri(float p)
 {
     p -= ffloor(p);
-    if (p < 0.25f)
-        return 4.0f * p;
-    if (p < 0.75f)
-        return 2.0f - 4.0f * p;
+    if (p < 0.25f) return 4.0f * p;
+    if (p < 0.75f) return 2.0f - 4.0f * p;
     return 4.0f * p - 4.0f;
 }
 
@@ -106,14 +107,12 @@ static inline uint16_t rgb565(float r, float g, float b)
     return (R << 11) | (G << 5) | B;
 }
 
-// ─── palette: spectral ROYGBIV ────────────────────────────────────────────────
-static void buildPalette()
-{
-    struct Stop
-    {
-        float t, r, g, b;
-    };
-    static const Stop stops[] = {
+// ─── palettes ─────────────────────────────────────────────────────────────────
+struct Stop { float t, r, g, b; };
+struct Palette { const char *name; Stop stops[8]; int n; };
+
+static const Palette palettes[10] = {
+    {"dark-spectral", {
         {0.000f, 1.0f, 0.0f, 0.0f},
         {0.167f, 1.0f, 0.5f, 0.0f},
         {0.333f, 1.0f, 1.0f, 0.0f},
@@ -121,41 +120,106 @@ static void buildPalette()
         {0.667f, 0.0f, 0.2f, 1.0f},
         {0.833f, 0.4f, 0.0f, 0.8f},
         {1.000f, 0.0f, 0.0f, 0.0f},
-    };
-    const int ns = 7;
+    }, 7},
+    {"spectral", {
+        {0.000f, 1.0f, 0.0f, 0.0f},
+        {0.167f, 1.0f, 0.5f, 0.0f},
+        {0.333f, 1.0f, 1.0f, 0.0f},
+        {0.500f, 0.0f, 1.0f, 0.0f},
+        {0.667f, 0.0f, 0.2f, 1.0f},
+        {0.833f, 0.4f, 0.0f, 0.8f},
+        {1.000f, 1.0f, 0.0f, 0.0f},
+    }, 7},
+    {"fire", {
+        {0.000f, 0.0f, 0.0f, 0.0f},
+        {0.250f, 0.5f, 0.0f, 0.0f},
+        {0.500f, 1.0f, 0.1f, 0.0f},
+        {0.750f, 1.0f, 0.5f, 0.0f},
+        {0.875f, 1.0f, 0.9f, 0.0f},
+        {1.000f, 1.0f, 1.0f, 0.8f},
+    }, 6},
+    {"ice", {
+        {0.000f, 0.0f, 0.0f, 0.0f},
+        {0.300f, 0.0f, 0.0f, 0.5f},
+        {0.600f, 0.0f, 0.3f, 1.0f},
+        {0.800f, 0.0f, 0.8f, 1.0f},
+        {1.000f, 0.9f, 1.0f, 1.0f},
+    }, 5},
+    {"plasma", {
+        {0.000f, 0.05f, 0.0f, 0.3f},
+        {0.250f, 0.5f,  0.0f, 0.8f},
+        {0.500f, 1.0f,  0.0f, 0.5f},
+        {0.750f, 1.0f,  0.4f, 0.0f},
+        {1.000f, 1.0f,  1.0f, 0.0f},
+    }, 5},
+    {"forest", {
+        {0.000f, 0.0f, 0.0f, 0.0f},
+        {0.300f, 0.0f, 0.2f, 0.0f},
+        {0.600f, 0.0f, 0.7f, 0.1f},
+        {0.800f, 0.4f, 0.9f, 0.0f},
+        {1.000f, 0.8f, 1.0f, 0.5f},
+    }, 5},
+    {"sunset", {
+        {0.000f, 0.05f, 0.0f,  0.15f},
+        {0.250f, 0.4f,  0.0f,  0.1f},
+        {0.500f, 1.0f,  0.15f, 0.0f},
+        {0.750f, 1.0f,  0.45f, 0.0f},
+        {1.000f, 1.0f,  0.9f,  0.2f},
+    }, 5},
+    {"mono", {
+        {0.000f, 0.0f, 0.0f, 0.0f},
+        {0.500f, 0.5f, 0.5f, 0.5f},
+        {1.000f, 1.0f, 1.0f, 1.0f},
+    }, 3},
+    {"lava", {
+        {0.000f, 0.0f, 0.0f, 0.0f},
+        {0.200f, 0.2f, 0.0f, 0.0f},
+        {0.500f, 0.7f, 0.0f, 0.0f},
+        {0.750f, 1.0f, 0.3f, 0.0f},
+        {0.900f, 1.0f, 0.8f, 0.0f},
+        {1.000f, 1.0f, 1.0f, 0.5f},
+    }, 6},
+    {"aurora", {
+        {0.000f, 0.0f,  0.0f,  0.0f},
+        {0.200f, 0.0f,  0.1f,  0.05f},
+        {0.400f, 0.0f,  0.8f,  0.3f},
+        {0.600f, 0.0f,  0.5f,  0.7f},
+        {0.800f, 0.25f, 0.0f,  0.7f},
+        {1.000f, 0.5f,  0.0f,  0.35f},
+    }, 6},
+};
+
+static void buildPalette(int idx)
+{
+    const Palette &p = palettes[idx];
     for (int i = 0; i < 256; i++)
     {
         float t = i / 255.0f;
         int j = 0;
-        while (j < ns - 2 && t > stops[j + 1].t)
-            j++;
-        float dt = (t - stops[j].t) / (stops[j + 1].t - stops[j].t);
+        while (j < p.n - 2 && t > p.stops[j + 1].t) j++;
+        float dt = (t - p.stops[j].t) / (p.stops[j + 1].t - p.stops[j].t);
         paletteLUT[i] = rgb565(
-            stops[j].r + dt * (stops[j + 1].r - stops[j].r),
-            stops[j].g + dt * (stops[j + 1].g - stops[j].g),
-            stops[j].b + dt * (stops[j + 1].b - stops[j].b));
+            p.stops[j].r + dt * (p.stops[j + 1].r - p.stops[j].r),
+            p.stops[j].g + dt * (p.stops[j + 1].g - p.stops[j].g),
+            p.stops[j].b + dt * (p.stops[j + 1].b - p.stops[j].b));
     }
 }
 
-// ─── render: coarse noise grid + bilinear upsample ────────────────────────────
-static void renderFrame(float soft)
+// ─── render ───────────────────────────────────────────────────────────────────
+static void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY)
 {
-    const float sc = 5.0f;
-
-    // step 1 — evaluate noise on CW×CH grid
     for (int j = 0; j < CH; j++)
     {
-        float ny = (float)j / CH * sc;
+        float ny = (float)j / CH;
         for (int i = 0; i < CW; i++)
         {
-            float nx = (float)i / CW * sc;
-            float A = fbm(nx, ny, gtime, 1);
-            float B = fbm(nx + 5.2f, ny + 1.3f, gtime * 0.85f, 7);
+            float nx = (float)i / CW;
+            float A = fbm(nx * scAX,         ny * scAY,         gtime, 1);
+            float B = fbm(nx * scBX + 5.2f,  ny * scBY + 1.3f,  qtime, 7);
             coarse[j * CW + i] = softXor(A, B, soft);
         }
     }
 
-    // step 2 — bilinear upsample to W×H, palette-map into fb[]
     const float sx = (float)(CW - 1) / (W - 1);
     const float sy = (float)(CH - 1) / (H - 1);
     for (int j = 0; j < H; j++)
@@ -163,11 +227,7 @@ static void renderFrame(float soft)
         float fy = j * sy;
         int cy = (int)fy;
         float ty = fy - cy;
-        if (cy >= CH - 1)
-        {
-            cy = CH - 2;
-            ty = 1.0f;
-        }
+        if (cy >= CH - 1) { cy = CH - 2; ty = 1.0f; }
         const float *row0 = coarse + cy * CW;
         const float *row1 = row0 + CW;
         for (int i = 0; i < W; i++)
@@ -175,13 +235,9 @@ static void renderFrame(float soft)
             float fx = i * sx;
             int cx = (int)fx;
             float tx = fx - cx;
-            if (cx >= CW - 1)
-            {
-                cx = CW - 2;
-                tx = 1.0f;
-            }
-            float v0 = lerpf(row0[cx], row0[cx + 1], tx);
-            float v1 = lerpf(row1[cx], row1[cx + 1], tx);
+            if (cx >= CW - 1) { cx = CW - 2; tx = 1.0f; }
+            float v0  = lerpf(row0[cx], row0[cx + 1], tx);
+            float v1  = lerpf(row1[cx], row1[cx + 1], tx);
             float val = lerpf(v0, v1, ty);
             int idx = (int)(val * 255.0f);
             idx = idx < 0 ? 0 : (idx > 255 ? 255 : idx);
@@ -198,33 +254,58 @@ void setup()
     pinMode(BTN_UP, INPUT_PULLUP);
     pinMode(BTN_DOWN, INPUT_PULLUP);
 
+    // full 0–3.3 V ADC range on all four pots
+    analogReadResolution(12);
+    analogSetPinAttenuation(A1, ADC_11db);
+    analogSetPinAttenuation(A2, ADC_11db);
+    analogSetPinAttenuation(A3, ADC_11db);
+    analogSetPinAttenuation(A4, ADC_11db);
+
     ProtomatterStatus s = matrix.begin();
     Serial.printf("matrix: %d  heap: %u\n", (int)s, ESP.getFreeHeap());
     if (s != PROTOMATTER_OK)
-        for (;;)
-            ;
+        for (;;);
 
-    buildPalette();
-    Serial.printf("ready  sharp=%.0f  coarse=%dx%d\n", gSharp, CW, CH);
+    buildPalette(paletteIdx);
+    Serial.printf("ready  palette=%s  coarse=%dx%d\n", palettes[paletteIdx].name, CW, CH);
 }
 
 void loop()
 {
-    if (!digitalRead(BTN_UP) && gSharp < 10.0f)
+    // edge-detect buttons → cycle palette (no blocking delay)
+    static bool upPrev = true, downPrev = true;
+    bool upNow   = digitalRead(BTN_UP);
+    bool downNow = digitalRead(BTN_DOWN);
+    if (!upNow && upPrev)
     {
-        gSharp += 1.0f;
-        Serial.printf("sharp=%.0f\n", gSharp);
-        delay(200);
+        paletteIdx = (paletteIdx + 1) % 10;
+        buildPalette(paletteIdx);
+        Serial.printf("palette=%s\n", palettes[paletteIdx].name);
     }
-    if (!digitalRead(BTN_DOWN) && gSharp > 6.0f)
+    if (!downNow && downPrev)
     {
-        gSharp -= 1.0f;
-        Serial.printf("sharp=%.0f\n", gSharp);
-        delay(200);
+        paletteIdx = (paletteIdx + 9) % 10;
+        buildPalette(paletteIdx);
+        Serial.printf("palette=%s\n", palettes[paletteIdx].name);
     }
+    upPrev   = upNow;
+    downPrev = downNow;
+
+    // read pots with EMA (α=0.15) — one read per frame, not per pixel
+    static const uint8_t potPins[4] = {A1, A2, A3, A4};
+    for (int k = 0; k < 4; k++)
+    {
+        float raw = analogRead(potPins[k]) / 4095.0f;
+        potVal[k] += 0.15f * (raw - potVal[k]);
+    }
+    // scale range 1–10; mid-pot ≈ current sc=5
+    float scAX = 1.0f + potVal[0] * 9.0f;
+    float scAY = 1.0f + potVal[1] * 9.0f;
+    float scBX = 1.0f + potVal[2] * 9.0f;
+    float scBY = 1.0f + potVal[3] * 9.0f;
 
     uint32_t t0 = micros();
-    renderFrame(gSharp);
+    renderFrame(SHARP, scAX, scAY, scBX, scBY);
     uint32_t tRender = micros() - t0;
 
     uint32_t t1 = micros();
@@ -235,6 +316,7 @@ void loop()
     uint32_t tPush = micros() - t1;
 
     gtime += 0.008f;
+    qtime += 0.001f;
     Serial.printf("render %lu us | push %lu us | fps %.1f\n",
                   (unsigned long)tRender, (unsigned long)tPush,
                   1e6f / (tRender + tPush));
