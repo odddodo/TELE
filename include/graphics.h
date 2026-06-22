@@ -3,8 +3,10 @@
 
 #define W 64
 #define H 64
-#define CW 32 // coarse noise grid
+#define CW 32 // coarse noise grid (A/B channels)
 #define CH 32
+#define BW 16 // blur channel grid (C)
+#define BH 16
 #define BITPLANES 6
 #define PALETTE_COUNT 10
 
@@ -42,8 +44,12 @@ static const float SCALE_MAX = 5.0f;
 
 static const float TSCALE_MAX = 2.0f; // pots 4–5  time speed × base rate (0 = frozen)
 
-static const float SF_MIN = 0.01f; // pots 6–7  sin fold frequency in cycles
+static const float SF_MIN = 0.01f; // pots 6–7  sin fold frequency A/B channels
 static const float SF_MAX = 10.0f;
+
+static const float SFC_MIN = 0.01f; // pot 10   sin fold frequency blur channel C
+static const float SFC_MAX = 10.0f;
+                                    // pot 11   blur amount 0–1 (no separate constant needed)
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -51,7 +57,7 @@ void graphicsInit(int paletteIdx);
 void buildPalette(int idx);
 void buildPaletteBlend(float t); // t = paletteIdx + pot fraction → blends two adjacent palettes
 void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
-                 float sfA, float sfB);
+                 float sfA, float sfB, float sfC, float blurAmount);
 void pushToPanel();
-void graphicsTick(float dtG, float dtQ); // advance gtime / qtime
+void graphicsTick(float dtG, float dtQ, float dtC); // advance gtime / qtime / ctime
 const char *paletteName(int idx);

@@ -11,18 +11,22 @@ static Adafruit_Protomatter matrix(W, 4, 1, rgbPins, 5, addrPins, 2, 47, 14, tru
 // ─── animation time ───────────────────────────────────────────────────────────
 static float gtime = 0.0f;
 static float qtime = 0.0f;
+static float btime = 0.0f; // blur channel — independent of A/B
 
-void graphicsTick(float dtG, float dtQ)
+void graphicsTick(float dtG, float dtQ, float dtC)
 {
     gtime += dtG;
     qtime += dtQ;
+    btime += dtC;
 }
 
 // ─── buffers ──────────────────────────────────────────────────────────────────
-static float coarse[CW * CH];
+static float    coarse[CW * CH];
+static float    coarseB[CW * CH]; // scratch copy for blur pass
+static float    blurC[BW * BH];   // C channel — spatially-varying blur weight
 static uint16_t fb[W * H];
 static uint16_t paletteLUT[256];
-static uint16_t paletteLUT2[256]; // scratch for blend
+static uint16_t paletteLUT2[256]; // scratch for palette blend
 
 // ─── math helpers ─────────────────────────────────────────────────────────────
 static inline int ffloor(float x)
@@ -278,21 +282,76 @@ const char *paletteName(int idx) { return palettes[idx].name; }
 
 // ─── render ───────────────────────────────────────────────────────────────────
 void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
-                 float sfA, float sfB)
+                 float sfA, float sfB, float sfC, float blurAmount)
 {
+    // ── A/B noise → softXor at 32×32 ─────────────────────────────────────────
     for (int j = 0; j < CH; j++)
     {
         float ny = (float)j / CH;
         for (int i = 0; i < CW; i++)
         {
             float nx = (float)i / CW;
-            float A = fbm(nx * scAX, ny * scAY, gtime, 1);
-            float B = fbm(nx * scBX + 5.2f, ny * scBY + 1.3f, qtime, 7);
-            // sinusoidal fold: maps each channel through sfN cycles over [0,1]
-            // low sfN → gentle remap; high sfN → multiple folds, complex interference
+            float A  = fbm(nx * scAX,        ny * scAY,        gtime, 1);
+            float B  = fbm(nx * scBX + 5.2f, ny * scBY + 1.3f, qtime, 7);
             float Aw = 0.5f + 0.5f * sinf(A * sfA * TWO_PI);
             float Bw = 0.5f + 0.5f * sinf(B * sfB * TWO_PI);
             coarse[j * CW + i] = softXor(Aw, Bw, soft);
+        }
+    }
+
+    // ── C channel blur at 16×16 → spatially-varying smooth ───────────────────
+    if (blurAmount > 0.005f)
+    {
+        // compute blur-weight map at BW×BH
+        // sin is amplified then clamped → wide flat bands with narrow transitions
+        for (int j = 0; j < BH; j++)
+        {
+            float ny = (float)j / BH;
+            for (int i = 0; i < BW; i++)
+            {
+                float nx = (float)i / BW;
+                float C  = fbm(nx * 1.5f, ny * 1.5f, btime, 13);
+                float cw = sinf(C * sfC * TWO_PI) * 3.0f; // amplify before clip
+                cw = cw < -1.0f ? -1.0f : (cw > 1.0f ? 1.0f : cw);
+                blurC[j * BW + i] = 0.5f + 0.5f * cw;
+            }
+        }
+
+        // snapshot coarse[] so the 3×3 reads are always from the unblurred frame
+        for (int k = 0; k < CW * CH; k++) coarseB[k] = coarse[k];
+
+        // bilinear upsample blur weights and apply per-cell weighted box blur
+        const float bsx = (float)(BW - 1) / (CW - 1);
+        const float bsy = (float)(BH - 1) / (CH - 1);
+        for (int j = 0; j < CH; j++)
+        {
+            float bfy = j * bsy;
+            int   bcy = (int)bfy;
+            float bty = bfy - bcy;
+            if (bcy >= BH - 1) { bcy = BH - 2; bty = 1.0f; }
+
+            for (int i = 0; i < CW; i++)
+            {
+                float bfx = i * bsx;
+                int   bcx = (int)bfx;
+                float btx = bfx - bcx;
+                if (bcx >= BW - 1) { bcx = BW - 2; btx = 1.0f; }
+
+                float cw = lerpf(lerpf(blurC[ bcy      * BW + bcx], blurC[ bcy      * BW + bcx + 1], btx),
+                                 lerpf(blurC[(bcy + 1)  * BW + bcx], blurC[(bcy + 1) * BW + bcx + 1], btx), bty);
+                float w = cw * blurAmount;
+                if (w < 0.005f) continue;
+
+                float sum = 0.0f; int n = 0;
+                for (int dj = -1; dj <= 1; dj++)
+                for (int di = -1; di <= 1; di++)
+                {
+                    int ni = i + di, nj = j + dj;
+                    if ((unsigned)ni < (unsigned)CW && (unsigned)nj < (unsigned)CH)
+                        { sum += coarseB[nj * CW + ni]; n++; }
+                }
+                coarse[j * CW + i] = lerpf(coarseB[j * CW + i], sum / n, w);
+            }
         }
     }
 
