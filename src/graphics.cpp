@@ -4,7 +4,7 @@
 #include <math.h>
 
 // ─── hardware ─────────────────────────────────────────────────────────────────
-static uint8_t rgbPins[]  = {42, 41, 40, 38, 39, 37};
+static uint8_t rgbPins[] = {42, 41, 40, 38, 39, 37};
 static uint8_t addrPins[] = {45, 36, 48, 35, 21};
 static Adafruit_Protomatter matrix(W, 4, 1, rgbPins, 5, addrPins, 2, 47, 14, true);
 
@@ -19,9 +19,10 @@ void graphicsTick(float dtG, float dtQ)
 }
 
 // ─── buffers ──────────────────────────────────────────────────────────────────
-static float    coarse[CW * CH];
+static float coarse[CW * CH];
 static uint16_t fb[W * H];
 static uint16_t paletteLUT[256];
+static uint16_t paletteLUT2[256]; // scratch for blend
 
 // ─── math helpers ─────────────────────────────────────────────────────────────
 static inline int ffloor(float x)
@@ -49,10 +50,10 @@ static float vnoise(float x, float y, float z, uint32_t s)
     int xi = ffloor(x), yi = ffloor(y), zi = ffloor(z);
     float xf = x - xi, yf = y - yi, zf = z - zi;
     float u = smoothf(xf), v = smoothf(yf), w = smoothf(zf);
-    float c000 = hash3(xi,     yi,     zi,     s), c100 = hash3(xi + 1, yi,     zi,     s);
-    float c010 = hash3(xi,     yi + 1, zi,     s), c110 = hash3(xi + 1, yi + 1, zi,     s);
-    float c001 = hash3(xi,     yi,     zi + 1, s), c101 = hash3(xi + 1, yi,     zi + 1, s);
-    float c011 = hash3(xi,     yi + 1, zi + 1, s), c111 = hash3(xi + 1, yi + 1, zi + 1, s);
+    float c000 = hash3(xi, yi, zi, s), c100 = hash3(xi + 1, yi, zi, s);
+    float c010 = hash3(xi, yi + 1, zi, s), c110 = hash3(xi + 1, yi + 1, zi, s);
+    float c001 = hash3(xi, yi, zi + 1, s), c101 = hash3(xi + 1, yi, zi + 1, s);
+    float c011 = hash3(xi, yi + 1, zi + 1, s), c111 = hash3(xi + 1, yi + 1, zi + 1, s);
     float x00 = lerpf(c000, c100, u), x10 = lerpf(c010, c110, u);
     float x01 = lerpf(c001, c101, u), x11 = lerpf(c011, c111, u);
     return lerpf(lerpf(x00, x10, v), lerpf(x01, x11, v), w);
@@ -74,8 +75,10 @@ static inline float fbm(float x, float y, float z, uint32_t s)
 static inline float tri(float p)
 {
     p -= ffloor(p);
-    if (p < 0.25f) return 4.0f * p;
-    if (p < 0.75f) return 2.0f - 4.0f * p;
+    if (p < 0.25f)
+        return 4.0f * p;
+    if (p < 0.75f)
+        return 2.0f - 4.0f * p;
     return 4.0f * p - 4.0f;
 }
 
@@ -88,7 +91,7 @@ static inline float softXor(float a, float b, float soft)
         float sb = 0.5f + 0.5f * soft * tri(b * freq);
         sa = sa < 0 ? 0 : (sa > 1 ? 1 : sa);
         sb = sb < 0 ? 0 : (sb > 1 ? 1 : sb);
-        float x  = sa + sb - 2.0f * sa * sb;
+        float x = sa + sb - 2.0f * sa * sb;
         float wt = 1.0f / (float)(1 << i);
         sum += wt * x;
         norm += wt;
@@ -105,89 +108,136 @@ static inline uint16_t rgb565(float r, float g, float b)
     return (R << 11) | (G << 5) | B;
 }
 
+static inline uint16_t lerpColor(Color c0, Color c1, float dt)
+{
+    float r0 = ((c0 >> 16) & 0xFF) * (1.0f / 255.0f);
+    float g0 = ((c0 >> 8) & 0xFF) * (1.0f / 255.0f);
+    float b0 = (c0 & 0xFF) * (1.0f / 255.0f);
+    float r1 = ((c1 >> 16) & 0xFF) * (1.0f / 255.0f);
+    float g1 = ((c1 >> 8) & 0xFF) * (1.0f / 255.0f);
+    float b1 = (c1 & 0xFF) * (1.0f / 255.0f);
+    return rgb565(r0 + dt * (r1 - r0), g0 + dt * (g1 - g0), b0 + dt * (b1 - b0));
+}
+
 // ─── palettes ─────────────────────────────────────────────────────────────────
-struct Stop    { float t, r, g, b; };
-struct Palette { const char *name; Stop stops[8]; int n; };
+// Each stop: { position 0–1, Color (0x00RRGGBB hex or Col:: named constant) }
+// Use Col:: names for standard colours; use hex literals for custom shades.
+struct Stop
+{
+    float t;
+    Color c;
+};
+struct Palette
+{
+    const char *name;
+    Stop stops[8];
+    int n;
+};
 
 static const Palette palettes[PALETTE_COUNT] = {
     {"dark-spectral", {
-        {0.000f, 1.0f, 0.0f, 0.0f},
-        {0.167f, 1.0f, 0.5f, 0.0f},
-        {0.333f, 1.0f, 1.0f, 0.0f},
-        {0.500f, 0.0f, 0.0f, 0.0f},
-        {0.667f, 0.0f, 0.2f, 1.0f},
-        {0.833f, 0.4f, 0.0f, 0.8f},
-        {1.000f, 0.0f, 0.0f, 0.0f},
-    }, 7},
+                          {0.000f, Col::Red},
+                          {0.167f, Col::Orange},
+                          {0.333f, Col::Yellow},
+                          {0.500f, Col::Black},
+                          {0.667f, Col::Blue},
+                          {0.833f, Col::Violet},
+                          {1.000f, Col::Black},
+                      },
+     7},
     {"spectral", {
-        {0.000f, 1.0f, 0.0f, 0.0f},
-        {0.167f, 1.0f, 0.5f, 0.0f},
-        {0.333f, 1.0f, 1.0f, 0.0f},
-        {0.500f, 0.0f, 1.0f, 0.0f},
-        {0.667f, 0.0f, 0.2f, 1.0f},
-        {0.833f, 0.4f, 0.0f, 0.8f},
-        {1.000f, 1.0f, 0.0f, 0.0f},
-    }, 7},
+                     {0.000f, Col::Violet},
+                     {0.167f, Col::Orange},
+                     {0.333f, Col::Cyan},
+                     {0.500f, Col::Black},
+                     {0.667f, Col::White},
+                     {0.833f, Col::DarkViolet},
+                     {1.000f, Col::Black},
+                 },
+     7},
     {"fire", {
-        {0.000f, 0.0f, 0.0f, 0.0f},
-        {0.250f, 0.5f, 0.0f, 0.0f},
-        {0.500f, 1.0f, 0.1f, 0.0f},
-        {0.750f, 1.0f, 0.5f, 0.0f},
-        {0.875f, 1.0f, 0.9f, 0.0f},
-        {1.000f, 1.0f, 1.0f, 0.8f},
-    }, 6},
-    {"ice", {
-        {0.000f, 0.0f, 0.0f, 0.0f},
-        {0.300f, 0.0f, 0.0f, 0.5f},
-        {0.600f, 0.0f, 0.3f, 1.0f},
-        {0.800f, 0.0f, 0.8f, 1.0f},
-        {1.000f, 0.9f, 1.0f, 1.0f},
-    }, 5},
-    {"plasma", {
-        {0.000f, 0.05f, 0.0f, 0.3f},
-        {0.250f, 0.5f,  0.0f, 0.8f},
-        {0.500f, 1.0f,  0.0f, 0.5f},
-        {0.750f, 1.0f,  0.4f, 0.0f},
-        {1.000f, 1.0f,  1.0f, 0.0f},
-    }, 5},
-    {"forest", {
-        {0.000f, 0.0f, 0.0f, 0.0f},
-        {0.300f, 0.0f, 0.2f, 0.0f},
-        {0.600f, 0.0f, 0.7f, 0.1f},
-        {0.800f, 0.4f, 0.9f, 0.0f},
-        {1.000f, 0.8f, 1.0f, 0.5f},
-    }, 5},
-    {"sunset", {
-        {0.000f, 0.05f, 0.0f,  0.15f},
-        {0.250f, 0.4f,  0.0f,  0.1f},
-        {0.500f, 1.0f,  0.15f, 0.0f},
-        {0.750f, 1.0f,  0.45f, 0.0f},
-        {1.000f, 1.0f,  0.9f,  0.2f},
-    }, 5},
-    {"mono", {
-        {0.000f, 0.0f, 0.0f, 0.0f},
-        {0.500f, 0.5f, 0.5f, 0.5f},
-        {1.000f, 1.0f, 1.0f, 1.0f},
-    }, 3},
-    {"lava", {
-        {0.000f, 0.0f, 0.0f, 0.0f},
-        {0.200f, 0.2f, 0.0f, 0.0f},
-        {0.500f, 0.7f, 0.0f, 0.0f},
-        {0.750f, 1.0f, 0.3f, 0.0f},
-        {0.900f, 1.0f, 0.8f, 0.0f},
-        {1.000f, 1.0f, 1.0f, 0.5f},
-    }, 6},
-    {"aurora", {
-        {0.000f, 0.0f,  0.0f,  0.0f},
-        {0.200f, 0.0f,  0.1f,  0.05f},
-        {0.400f, 0.0f,  0.8f,  0.3f},
-        {0.600f, 0.0f,  0.5f,  0.7f},
-        {0.800f, 0.25f, 0.0f,  0.7f},
-        {1.000f, 0.5f,  0.0f,  0.35f},
-    }, 6},
+                 {0.000f, Col::Purple},
+                 {0.167f, Col::Green},
+                 {0.333f, Col::Yellow},
+                 {0.500f, Col::Black},
+                 {0.667f, Col::Blue},
+                 {0.833f, Col::DarkViolet},
+                 {1.000f, Col::Black},
+             },
+     7},
+    {"cold", {
+                 {0.000f, Col::Cyan},
+                 {0.167f, Col::Blue},
+                 {0.333f, Col::DarkBlue},
+                 {0.500f, Col::Black},
+                 {0.667f, Col::Violet},
+                 {0.833f, Col::Purple},
+                 {1.000f, Col::Black},
+             },
+     7},
+    {"nature", {
+                   {0.000f, Col::Yellow},
+                   {0.167f, 0x66E500},      // yellow-green
+                   {0.333f, Col::Green},
+                   {0.500f, Col::Black},
+                   {0.667f, 0x00B219},      // forest green
+                   {0.833f, Col::DarkGreen},
+                   {1.000f, Col::Black},
+               },
+     7},
+    {"ember", {
+                  {0.000f, Col::Yellow},
+                  {0.167f, Col::Orange},
+                  {0.333f, Col::Red},
+                  {0.500f, Col::Black},
+                  {0.667f, Col::DarkRed},
+                  {0.833f, 0x330000},       // near-black red
+                  {1.000f, Col::Black},
+              },
+     7},
+    {"dusk", {
+                 {0.000f, Col::White},
+                 {0.167f, Col::Gray},
+                 {0.333f, Col::Cyan},
+                 {0.500f, Col::Black},
+                 {0.667f, Col::DarkBlue},
+                 {0.833f, 0x000033},        // near-black blue
+                 {1.000f, Col::Black},
+             },
+     7},
+    {"neon", {
+                 {0.000f, 0xFF0080},        // hot pink
+                 {0.167f, Col::Violet},
+                 {0.333f, Col::Blue},
+                 {0.500f, Col::Black},
+                 {0.667f, Col::Cyan},
+                 {0.833f, Col::Green},
+                 {1.000f, Col::Black},
+             },
+     7},
+    {"rose", {
+                 {0.000f, Col::White},
+                 {0.167f, 0xFFCCFF},        // pale lavender
+                 {0.333f, 0xFF99CC},        // soft pink
+                 {0.500f, Col::Black},
+                 {0.667f, 0xFF0080},        // hot pink
+                 {0.833f, Col::Purple},
+                 {1.000f, Col::Black},
+             },
+     7},
+    {"gold", {
+                 {0.000f, Col::White},
+                 {0.167f, 0xFFFF80},        // pale yellow
+                 {0.333f, Col::Yellow},
+                 {0.500f, Col::Black},
+                 {0.667f, Col::Orange},
+                 {0.833f, 0xFF6600},        // deep orange
+                 {1.000f, Col::Black},
+             },
+     7},
 };
 
-void buildPalette(int idx)
+static void buildPaletteInto(int idx, uint16_t *lut)
 {
     const Palette &p = palettes[idx];
     for (int i = 0; i < 256; i++)
@@ -196,10 +246,31 @@ void buildPalette(int idx)
         int j = 0;
         while (j < p.n - 2 && t > p.stops[j + 1].t) j++;
         float dt = (t - p.stops[j].t) / (p.stops[j + 1].t - p.stops[j].t);
-        paletteLUT[i] = rgb565(
-            p.stops[j].r + dt * (p.stops[j + 1].r - p.stops[j].r),
-            p.stops[j].g + dt * (p.stops[j + 1].g - p.stops[j].g),
-            p.stops[j].b + dt * (p.stops[j + 1].b - p.stops[j].b));
+        lut[i] = lerpColor(p.stops[j].c, p.stops[j + 1].c, dt);
+    }
+}
+
+void buildPalette(int idx) { buildPaletteInto(idx, paletteLUT); }
+
+void buildPaletteBlend(float t)
+{
+    int a    = (int)t % PALETTE_COUNT;
+    float fr = t - (int)t;
+    int b    = (a + 1) % PALETTE_COUNT;
+
+    buildPaletteInto(a, paletteLUT);
+    if (fr < 0.005f) return;
+
+    buildPaletteInto(b, paletteLUT2);
+    for (int i = 0; i < 256; i++)
+    {
+        uint16_t ca = paletteLUT[i], cb = paletteLUT2[i];
+        int ra = (ca >> 11) & 0x1F, rb = (cb >> 11) & 0x1F;
+        int ga = (ca >>  5) & 0x3F, gb = (cb >>  5) & 0x3F;
+        int ba =  ca        & 0x1F, bb =  cb        & 0x1F;
+        paletteLUT[i] = ((uint16_t)(ra + (int)(fr * (rb - ra))) << 11) |
+                        ((uint16_t)(ga + (int)(fr * (gb - ga))) <<  5) |
+                         (uint16_t)(ba + (int)(fr * (bb - ba)));
     }
 }
 
@@ -215,8 +286,8 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
         for (int i = 0; i < CW; i++)
         {
             float nx = (float)i / CW;
-            float A  = fbm(nx * scAX,        ny * scAY,        gtime, 1);
-            float B  = fbm(nx * scBX + 5.2f, ny * scBY + 1.3f, qtime, 7);
+            float A = fbm(nx * scAX, ny * scAY, gtime, 1);
+            float B = fbm(nx * scBX + 5.2f, ny * scBY + 1.3f, qtime, 7);
             // sinusoidal fold: maps each channel through sfN cycles over [0,1]
             // low sfN → gentle remap; high sfN → multiple folds, complex interference
             float Aw = 0.5f + 0.5f * sinf(A * sfA * TWO_PI);
@@ -230,21 +301,29 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
     for (int j = 0; j < H; j++)
     {
         float fy = j * sy;
-        int   cy = (int)fy;
+        int cy = (int)fy;
         float ty = fy - cy;
-        if (cy >= CH - 1) { cy = CH - 2; ty = 1.0f; }
+        if (cy >= CH - 1)
+        {
+            cy = CH - 2;
+            ty = 1.0f;
+        }
         const float *row0 = coarse + cy * CW;
         const float *row1 = row0 + CW;
         for (int i = 0; i < W; i++)
         {
             float fx = i * sx;
-            int   cx = (int)fx;
+            int cx = (int)fx;
             float tx = fx - cx;
-            if (cx >= CW - 1) { cx = CW - 2; tx = 1.0f; }
-            float v0  = lerpf(row0[cx], row0[cx + 1], tx);
-            float v1  = lerpf(row1[cx], row1[cx + 1], tx);
+            if (cx >= CW - 1)
+            {
+                cx = CW - 2;
+                tx = 1.0f;
+            }
+            float v0 = lerpf(row0[cx], row0[cx + 1], tx);
+            float v1 = lerpf(row1[cx], row1[cx + 1], tx);
             float val = lerpf(v0, v1, ty);
-            int idx   = (int)(val * 255.0f);
+            int idx = (int)(val * 255.0f);
             idx = idx < 0 ? 0 : (idx > 255 ? 255 : idx);
             fb[j * W + i] = paletteLUT[idx];
         }
@@ -265,6 +344,7 @@ void graphicsInit(int paletteIdx)
     ProtomatterStatus s = matrix.begin();
     Serial.printf("matrix: %d  heap: %u\n", (int)s, ESP.getFreeHeap());
     if (s != PROTOMATTER_OK)
-        for (;;) ;
+        for (;;)
+            ;
     buildPalette(paletteIdx);
 }
