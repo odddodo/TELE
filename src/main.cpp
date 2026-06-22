@@ -1,322 +1,82 @@
 #include <Arduino.h>
-#include <Adafruit_Protomatter.h>
-#include <math.h>
+#include "graphics.h"
+#include "comms.h"
 
-// ─── hardware ─────────────────────────────────────────────────────────────────
-#define W 64
-#define H 64
-#define BTN_UP 6
+#define BTN_UP   6
 #define BTN_DOWN 7
-#define CW 32
-#define CH 32
-#define BITPLANES 6
 
 static const float SHARP = 7.0f;
 
-static uint8_t rgbPins[]  = {42, 41, 40, 38, 39, 37};
-static uint8_t addrPins[] = {45, 36, 48, 35, 21};
-Adafruit_Protomatter matrix(W, 4, 1, rgbPins, 5, addrPins, 2, 47, 14, true);
+static int   paletteIdx = 0;
+static float smooth[COMMS_MAX_VALS];   // EMA-smoothed 0–1 values from remote pots
 
-// ─── state ────────────────────────────────────────────────────────────────────
-static float    coarse[CW * CH];
-static uint16_t fb[W * H];
-static uint16_t paletteLUT[256];
-static float    gtime = 0.0f;
-static float    qtime = 0.0f;
-static int      paletteIdx = 0;
-static float    potVal[4] = {0.5f, 0.5f, 0.5f, 0.5f};
+// map a smoothed 0–1 value to noise scale 1–10
+static inline float toScale(float v) { return 1.0f + v * 9.0f; }
 
-// ─── math helpers ─────────────────────────────────────────────────────────────
-static inline int ffloor(float x)
-{
-    int xi = (int)x;
-    return (x < xi) ? xi - 1 : xi;
-}
-
-static const float INV24 = 1.0f / 16777215.0f;
-
-static inline float hash3(int x, int y, int z, uint32_t s)
-{
-    uint32_t h = (uint32_t)(x * 374761393) ^ (uint32_t)(y * 668265263) ^ (uint32_t)(z * 2147483647u) ^ (s * 1013904223u);
-    h = (h ^ (h >> 13)) * 1274126177u;
-    h ^= h >> 16;
-    return (h & 0xFFFFFF) * INV24;
-}
-
-static inline float smoothf(float t) { return t * t * (3.0f - 2.0f * t); }
-static inline float lerpf(float a, float b, float t) { return a + (b - a) * t; }
-
-static float vnoise(float x, float y, float z, uint32_t s)
-{
-    int xi = ffloor(x), yi = ffloor(y), zi = ffloor(z);
-    float xf = x - xi, yf = y - yi, zf = z - zi;
-    float u = smoothf(xf), v = smoothf(yf), w = smoothf(zf);
-    float c000 = hash3(xi, yi, zi, s),       c100 = hash3(xi + 1, yi, zi, s);
-    float c010 = hash3(xi, yi + 1, zi, s),   c110 = hash3(xi + 1, yi + 1, zi, s);
-    float c001 = hash3(xi, yi, zi + 1, s),   c101 = hash3(xi + 1, yi, zi + 1, s);
-    float c011 = hash3(xi, yi + 1, zi + 1, s), c111 = hash3(xi + 1, yi + 1, zi + 1, s);
-    float x00 = lerpf(c000, c100, u), x10 = lerpf(c010, c110, u);
-    float x01 = lerpf(c001, c101, u), x11 = lerpf(c011, c111, u);
-    return lerpf(lerpf(x00, x10, v), lerpf(x01, x11, v), w);
-}
-
-static inline float fbm(float x, float y, float z, uint32_t s)
-{
-    float val = 0, a = 0.6f, f = 1.0f, n = 0;
-    for (int o = 0; o < 2; o++)
-    {
-        val += a * vnoise(x * f, y * f, z * f, s + o * 17);
-        n += a;
-        a *= 0.5f;
-        f *= 2.3f;
-    }
-    return val / n;
-}
-
-static inline float tri(float p)
-{
-    p -= ffloor(p);
-    if (p < 0.25f) return 4.0f * p;
-    if (p < 0.75f) return 2.0f - 4.0f * p;
-    return 4.0f * p - 4.0f;
-}
-
-static inline float softXor(float a, float b, float soft)
-{
-    float sum = 0, norm = 0, freq = 1.0f;
-    for (int i = 1; i <= BITPLANES; i++)
-    {
-        float sa = 0.5f + 0.5f * soft * tri(a * freq);
-        float sb = 0.5f + 0.5f * soft * tri(b * freq);
-        sa = sa < 0 ? 0 : (sa > 1 ? 1 : sa);
-        sb = sb < 0 ? 0 : (sb > 1 ? 1 : sb);
-        float x = sa + sb - 2.0f * sa * sb;
-        float wt = 1.0f / (float)(1 << i);
-        sum += wt * x;
-        norm += wt;
-        freq *= 2.0f;
-    }
-    return sum / norm;
-}
-
-static inline uint16_t rgb565(float r, float g, float b)
-{
-    uint16_t R = (uint16_t)(r * 31) & 0x1F;
-    uint16_t G = (uint16_t)(g * 63) & 0x3F;
-    uint16_t B = (uint16_t)(b * 31) & 0x1F;
-    return (R << 11) | (G << 5) | B;
-}
-
-// ─── palettes ─────────────────────────────────────────────────────────────────
-struct Stop { float t, r, g, b; };
-struct Palette { const char *name; Stop stops[8]; int n; };
-
-static const Palette palettes[10] = {
-    {"dark-spectral", {
-        {0.000f, 1.0f, 0.0f, 0.0f},
-        {0.167f, 1.0f, 0.5f, 0.0f},
-        {0.333f, 1.0f, 1.0f, 0.0f},
-        {0.500f, 0.0f, 0.0f, 0.0f},
-        {0.667f, 0.0f, 0.2f, 1.0f},
-        {0.833f, 0.4f, 0.0f, 0.8f},
-        {1.000f, 0.0f, 0.0f, 0.0f},
-    }, 7},
-    {"spectral", {
-        {0.000f, 1.0f, 0.0f, 0.0f},
-        {0.167f, 1.0f, 0.5f, 0.0f},
-        {0.333f, 1.0f, 1.0f, 0.0f},
-        {0.500f, 0.0f, 1.0f, 0.0f},
-        {0.667f, 0.0f, 0.2f, 1.0f},
-        {0.833f, 0.4f, 0.0f, 0.8f},
-        {1.000f, 1.0f, 0.0f, 0.0f},
-    }, 7},
-    {"fire", {
-        {0.000f, 0.0f, 0.0f, 0.0f},
-        {0.250f, 0.5f, 0.0f, 0.0f},
-        {0.500f, 1.0f, 0.1f, 0.0f},
-        {0.750f, 1.0f, 0.5f, 0.0f},
-        {0.875f, 1.0f, 0.9f, 0.0f},
-        {1.000f, 1.0f, 1.0f, 0.8f},
-    }, 6},
-    {"ice", {
-        {0.000f, 0.0f, 0.0f, 0.0f},
-        {0.300f, 0.0f, 0.0f, 0.5f},
-        {0.600f, 0.0f, 0.3f, 1.0f},
-        {0.800f, 0.0f, 0.8f, 1.0f},
-        {1.000f, 0.9f, 1.0f, 1.0f},
-    }, 5},
-    {"plasma", {
-        {0.000f, 0.05f, 0.0f, 0.3f},
-        {0.250f, 0.5f,  0.0f, 0.8f},
-        {0.500f, 1.0f,  0.0f, 0.5f},
-        {0.750f, 1.0f,  0.4f, 0.0f},
-        {1.000f, 1.0f,  1.0f, 0.0f},
-    }, 5},
-    {"forest", {
-        {0.000f, 0.0f, 0.0f, 0.0f},
-        {0.300f, 0.0f, 0.2f, 0.0f},
-        {0.600f, 0.0f, 0.7f, 0.1f},
-        {0.800f, 0.4f, 0.9f, 0.0f},
-        {1.000f, 0.8f, 1.0f, 0.5f},
-    }, 5},
-    {"sunset", {
-        {0.000f, 0.05f, 0.0f,  0.15f},
-        {0.250f, 0.4f,  0.0f,  0.1f},
-        {0.500f, 1.0f,  0.15f, 0.0f},
-        {0.750f, 1.0f,  0.45f, 0.0f},
-        {1.000f, 1.0f,  0.9f,  0.2f},
-    }, 5},
-    {"mono", {
-        {0.000f, 0.0f, 0.0f, 0.0f},
-        {0.500f, 0.5f, 0.5f, 0.5f},
-        {1.000f, 1.0f, 1.0f, 1.0f},
-    }, 3},
-    {"lava", {
-        {0.000f, 0.0f, 0.0f, 0.0f},
-        {0.200f, 0.2f, 0.0f, 0.0f},
-        {0.500f, 0.7f, 0.0f, 0.0f},
-        {0.750f, 1.0f, 0.3f, 0.0f},
-        {0.900f, 1.0f, 0.8f, 0.0f},
-        {1.000f, 1.0f, 1.0f, 0.5f},
-    }, 6},
-    {"aurora", {
-        {0.000f, 0.0f,  0.0f,  0.0f},
-        {0.200f, 0.0f,  0.1f,  0.05f},
-        {0.400f, 0.0f,  0.8f,  0.3f},
-        {0.600f, 0.0f,  0.5f,  0.7f},
-        {0.800f, 0.25f, 0.0f,  0.7f},
-        {1.000f, 0.5f,  0.0f,  0.35f},
-    }, 6},
-};
-
-static void buildPalette(int idx)
-{
-    const Palette &p = palettes[idx];
-    for (int i = 0; i < 256; i++)
-    {
-        float t = i / 255.0f;
-        int j = 0;
-        while (j < p.n - 2 && t > p.stops[j + 1].t) j++;
-        float dt = (t - p.stops[j].t) / (p.stops[j + 1].t - p.stops[j].t);
-        paletteLUT[i] = rgb565(
-            p.stops[j].r + dt * (p.stops[j + 1].r - p.stops[j].r),
-            p.stops[j].g + dt * (p.stops[j + 1].g - p.stops[j].g),
-            p.stops[j].b + dt * (p.stops[j + 1].b - p.stops[j].b));
-    }
-}
-
-// ─── render ───────────────────────────────────────────────────────────────────
-static void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY)
-{
-    for (int j = 0; j < CH; j++)
-    {
-        float ny = (float)j / CH;
-        for (int i = 0; i < CW; i++)
-        {
-            float nx = (float)i / CW;
-            float A = fbm(nx * scAX,         ny * scAY,         gtime, 1);
-            float B = fbm(nx * scBX + 5.2f,  ny * scBY + 1.3f,  qtime, 7);
-            coarse[j * CW + i] = softXor(A, B, soft);
-        }
-    }
-
-    const float sx = (float)(CW - 1) / (W - 1);
-    const float sy = (float)(CH - 1) / (H - 1);
-    for (int j = 0; j < H; j++)
-    {
-        float fy = j * sy;
-        int cy = (int)fy;
-        float ty = fy - cy;
-        if (cy >= CH - 1) { cy = CH - 2; ty = 1.0f; }
-        const float *row0 = coarse + cy * CW;
-        const float *row1 = row0 + CW;
-        for (int i = 0; i < W; i++)
-        {
-            float fx = i * sx;
-            int cx = (int)fx;
-            float tx = fx - cx;
-            if (cx >= CW - 1) { cx = CW - 2; tx = 1.0f; }
-            float v0  = lerpf(row0[cx], row0[cx + 1], tx);
-            float v1  = lerpf(row1[cx], row1[cx + 1], tx);
-            float val = lerpf(v0, v1, ty);
-            int idx = (int)(val * 255.0f);
-            idx = idx < 0 ? 0 : (idx > 255 ? 255 : idx);
-            fb[j * W + i] = paletteLUT[idx];
-        }
-    }
-}
-
-// ─── entry points ─────────────────────────────────────────────────────────────
 void setup()
 {
     Serial.begin(115200);
     delay(500);
-    pinMode(BTN_UP, INPUT_PULLUP);
+    pinMode(BTN_UP,   INPUT_PULLUP);
     pinMode(BTN_DOWN, INPUT_PULLUP);
 
-    // full 0–3.3 V ADC range on all four pots
-    analogReadResolution(12);
-    analogSetPinAttenuation(A1, ADC_11db);
-    analogSetPinAttenuation(A2, ADC_11db);
-    analogSetPinAttenuation(A3, ADC_11db);
-    analogSetPinAttenuation(A4, ADC_11db);
+    // start smooth[] at mid-range so the noise looks reasonable before any packet arrives
+    for (int k = 0; k < COMMS_MAX_VALS; k++) smooth[k] = 0.5f;
 
-    ProtomatterStatus s = matrix.begin();
-    Serial.printf("matrix: %d  heap: %u\n", (int)s, ESP.getFreeHeap());
-    if (s != PROTOMATTER_OK)
-        for (;;);
+    graphicsInit(paletteIdx);
+    commsInit();
 
-    buildPalette(paletteIdx);
-    Serial.printf("ready  palette=%s  coarse=%dx%d\n", palettes[paletteIdx].name, CW, CH);
+    Serial.printf("ready  palette=%s\n", paletteName(paletteIdx));
 }
 
 void loop()
 {
-    // edge-detect buttons → cycle palette (no blocking delay)
+    // ── palette switching (falling-edge detect, no blocking delay) ──────────
     static bool upPrev = true, downPrev = true;
     bool upNow   = digitalRead(BTN_UP);
     bool downNow = digitalRead(BTN_DOWN);
     if (!upNow && upPrev)
     {
-        paletteIdx = (paletteIdx + 1) % 10;
+        paletteIdx = (paletteIdx + 1) % PALETTE_COUNT;
         buildPalette(paletteIdx);
-        Serial.printf("palette=%s\n", palettes[paletteIdx].name);
+        Serial.printf("palette=%s\n", paletteName(paletteIdx));
     }
     if (!downNow && downPrev)
     {
-        paletteIdx = (paletteIdx + 9) % 10;
+        paletteIdx = (paletteIdx + 9) % PALETTE_COUNT;   // +9 mod 10 = -1 with wrap
         buildPalette(paletteIdx);
-        Serial.printf("palette=%s\n", palettes[paletteIdx].name);
+        Serial.printf("palette=%s\n", paletteName(paletteIdx));
     }
     upPrev   = upNow;
     downPrev = downNow;
 
-    // read pots with EMA (α=0.15) — one read per frame, not per pixel
-    static const uint8_t potPins[4] = {A1, A2, A3, A4};
-    for (int k = 0; k < 4; k++)
+    // ── absorb latest ESP-NOW packet into smoothed values ───────────────────
+    if (commsFresh())
     {
-        float raw = analogRead(potPins[k]) / 4095.0f;
-        potVal[k] += 0.15f * (raw - potVal[k]);
+        CommsPacket pkt;
+        commsGet(pkt);
+        for (int k = 0; k < pkt.count && k < COMMS_MAX_VALS; k++)
+        {
+            float raw = pkt.vals[k] / 4095.0f;
+            smooth[k] += 0.15f * (raw - smooth[k]);   // α = 0.15 EMA
+        }
     }
-    // scale range 1–10; mid-pot ≈ current sc=5
-    float scAX = 1.0f + potVal[0] * 9.0f;
-    float scAY = 1.0f + potVal[1] * 9.0f;
-    float scBX = 1.0f + potVal[2] * 9.0f;
-    float scBY = 1.0f + potVal[3] * 9.0f;
 
+    // vals 0–3 → noise scale X/Y for channels A and B
     uint32_t t0 = micros();
-    renderFrame(SHARP, scAX, scAY, scBX, scBY);
+    renderFrame(SHARP,
+                toScale(smooth[0]),   // channel A  x-scale
+                toScale(smooth[1]),   // channel A  y-scale
+                toScale(smooth[2]),   // channel B  x-scale
+                toScale(smooth[3])); // channel B  y-scale
     uint32_t tRender = micros() - t0;
 
     uint32_t t1 = micros();
-    for (int j = 0; j < H; j++)
-        for (int i = 0; i < W; i++)
-            matrix.drawPixel(i, j, fb[j * W + i]);
-    matrix.show();
+    pushToPanel();
     uint32_t tPush = micros() - t1;
 
-    gtime += 0.008f;
-    qtime += 0.001f;
+    graphicsTick(0.008f, 0.001f);
+
     Serial.printf("render %lu us | push %lu us | fps %.1f\n",
                   (unsigned long)tRender, (unsigned long)tPush,
                   1e6f / (tRender + tPush));
