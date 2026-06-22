@@ -206,7 +206,8 @@ void buildPalette(int idx)
 const char *paletteName(int idx) { return palettes[idx].name; }
 
 // ─── render ───────────────────────────────────────────────────────────────────
-void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY)
+void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
+                 float sfA, float sfB)
 {
     for (int j = 0; j < CH; j++)
     {
@@ -216,7 +217,11 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY)
             float nx = (float)i / CW;
             float A  = fbm(nx * scAX,        ny * scAY,        gtime, 1);
             float B  = fbm(nx * scBX + 5.2f, ny * scBY + 1.3f, qtime, 7);
-            coarse[j * CW + i] = softXor(A, B, soft);
+            // sinusoidal fold: maps each channel through sfN cycles over [0,1]
+            // low sfN → gentle remap; high sfN → multiple folds, complex interference
+            float Aw = 0.5f + 0.5f * sinf(A * sfA * TWO_PI);
+            float Bw = 0.5f + 0.5f * sinf(B * sfB * TWO_PI);
+            coarse[j * CW + i] = softXor(Aw, Bw, soft);
         }
     }
 

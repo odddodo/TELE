@@ -5,13 +5,10 @@
 #define BTN_UP   6
 #define BTN_DOWN 7
 
-static const float SHARP = 7.0f;
-
 static int   paletteIdx = 0;
 static float smooth[COMMS_MAX_VALS];   // EMA-smoothed 0–1 values from remote pots
 
-// map a smoothed 0–1 value to noise scale 1–10
-static inline float toScale(float v) { return 1.0f + v * 9.0f; }
+static inline float toScale(float v) { return SCALE_MIN + v * (SCALE_MAX - SCALE_MIN); }
 
 void setup()
 {
@@ -62,20 +59,27 @@ void loop()
         }
     }
 
-    // vals 0–3 → noise scale X/Y for channels A and B
+    // ── map all 8 pots ──────────────────────────────────────────────────────
+    // 0–3: noise spatial scale X/Y per channel (1–10)
+    // 4–5: animation time scale per channel (0 = frozen, 1 = base rate, 4 = 4×)
+    // 6–7: sinusoidal color-fold frequency per channel (1–8 cycles)
+    float tscA = smooth[4] * TSCALE_MAX;
+    float tscB = smooth[5] * TSCALE_MAX;
+    float sfA  = SF_MIN + smooth[6] * (SF_MAX - SF_MIN);
+    float sfB  = SF_MIN + smooth[7] * (SF_MAX - SF_MIN);
+
     uint32_t t0 = micros();
     renderFrame(SHARP,
-                toScale(smooth[0]),   // channel A  x-scale
-                toScale(smooth[1]),   // channel A  y-scale
-                toScale(smooth[2]),   // channel B  x-scale
-                toScale(smooth[3])); // channel B  y-scale
+                toScale(smooth[0]), toScale(smooth[1]),   // ch A  scl x, scl y
+                toScale(smooth[2]), toScale(smooth[3]),   // ch B  scl x, scl y
+                sfA, sfB);                                // sin freq ch A, ch B
     uint32_t tRender = micros() - t0;
 
     uint32_t t1 = micros();
     pushToPanel();
     uint32_t tPush = micros() - t1;
 
-    graphicsTick(0.008f, 0.001f);
+    graphicsTick(0.008f * tscA, 0.001f * tscB);
 
     Serial.printf("render %lu us | push %lu us | fps %.1f\n",
                   (unsigned long)tRender, (unsigned long)tPush,
