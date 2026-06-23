@@ -22,7 +22,8 @@ void graphicsTick(float dtG, float dtQ, float dtC)
 
 // ─── buffers ──────────────────────────────────────────────────────────────────
 static float    coarse[CW * CH];
-static float    coarseB[CW * CH]; // scratch copy for blur pass
+static float    mip1[16 * 16];
+static float    mip2[8 * 8];
 static float    blurC[BW * BH];   // C channel — spatially-varying blur weight
 static uint16_t fb[W * H];
 static uint16_t paletteLUT[256];
@@ -63,17 +64,20 @@ static float vnoise(float x, float y, float z, uint32_t s)
     return lerpf(lerpf(x00, x10, v), lerpf(x01, x11, v), w);
 }
 
+static const float SOFTXOR_W[BITPLANES] = {0.5f, 0.25f, 0.125f, 0.0625f, 0.03125f, 0.015625f};
+static const float SOFTXOR_INVNORM = 1.0f / 0.984375f; // 1 / (sum of weights, 63/64)
+static const float FBM_INVN = 1.0f / 0.9f;             // fbm n is always 0.6 + 0.3
+
 static inline float fbm(float x, float y, float z, uint32_t s)
 {
-    float val = 0, a = 0.6f, f = 1.0f, n = 0;
+    float val = 0, a = 0.6f, f = 1.0f;
     for (int o = 0; o < 2; o++)
     {
         val += a * vnoise(x * f, y * f, z * f, s + o * 17);
-        n += a;
         a *= 0.5f;
         f *= 2.3f;
     }
-    return val / n;
+    return val * FBM_INVN;
 }
 
 static inline float tri(float p)
@@ -88,20 +92,33 @@ static inline float tri(float p)
 
 static inline float softXor(float a, float b, float soft)
 {
-    float sum = 0, norm = 0, freq = 1.0f;
-    for (int i = 1; i <= BITPLANES; i++)
+    float sum = 0.0f, freq = 1.0f;
+    for (int k = 0; k < BITPLANES; k++)
     {
         float sa = 0.5f + 0.5f * soft * tri(a * freq);
         float sb = 0.5f + 0.5f * soft * tri(b * freq);
         sa = sa < 0 ? 0 : (sa > 1 ? 1 : sa);
         sb = sb < 0 ? 0 : (sb > 1 ? 1 : sb);
         float x = sa + sb - 2.0f * sa * sb;
-        float wt = 1.0f / (float)(1 << i);
-        sum += wt * x;
-        norm += wt;
+        sum += SOFTXOR_W[k] * x;
         freq *= 2.0f;
     }
-    return sum / norm;
+    return sum * SOFTXOR_INVNORM;
+}
+
+static inline float sampleGrid(const float *buf, int w, int h, float fx, float fy)
+{
+    if (fx < 0) fx = 0;
+    if (fx > w - 1) fx = w - 1;
+    if (fy < 0) fy = 0;
+    if (fy > h - 1) fy = h - 1;
+    int x0 = (int)fx, y0 = (int)fy;
+    int x1 = x0 + 1 < w ? x0 + 1 : x0;
+    int y1 = y0 + 1 < h ? y0 + 1 : y0;
+    float tx = fx - x0, ty = fy - y0;
+    float a = lerpf(buf[y0 * w + x0], buf[y0 * w + x1], tx);
+    float b = lerpf(buf[y1 * w + x0], buf[y1 * w + x1], tx);
+    return lerpf(a, b, ty);
 }
 
 static inline uint16_t rgb565(float r, float g, float b)
@@ -302,8 +319,7 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
     // ── C channel blur at 16×16 → spatially-varying smooth ───────────────────
     if (blurAmount > 0.005f)
     {
-        // compute blur-weight map at BW×BH
-        // sin is amplified then clamped → wide flat bands with narrow transitions
+        // ── C channel blur-weight map at 16×16 (UNCHANGED — keep existing loop) ──
         for (int j = 0; j < BH; j++)
         {
             float ny = (float)j / BH;
@@ -311,46 +327,58 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
             {
                 float nx = (float)i / BW;
                 float C  = fbm(nx * 1.5f, ny * 1.5f, btime, 13);
-                float cw = sinf(C * sfC * TWO_PI) * 3.0f; // amplify before clip
+                float cw = sinf(C * sfC * TWO_PI) * 3.0f;
                 cw = cw < -1.0f ? -1.0f : (cw > 1.0f ? 1.0f : cw);
                 blurC[j * BW + i] = 0.5f + 0.5f * cw;
             }
         }
 
-        // snapshot coarse[] so the 3×3 reads are always from the unblurred frame
-        for (int k = 0; k < CW * CH; k++) coarseB[k] = coarse[k];
+        // ── build mip pyramid from coarse[] (mip0 = coarse, mip1 = 16, mip2 = 8) ──
+        for (int j = 0; j < 16; j++)
+            for (int i = 0; i < 16; i++)
+            {
+                int si = 2 * i, sj = 2 * j;
+                mip1[j * 16 + i] = 0.25f * (coarse[sj * CW + si]       + coarse[sj * CW + si + 1] +
+                                            coarse[(sj + 1) * CW + si]  + coarse[(sj + 1) * CW + si + 1]);
+            }
+        for (int j = 0; j < 8; j++)
+            for (int i = 0; i < 8; i++)
+            {
+                int si = 2 * i, sj = 2 * j;
+                mip2[j * 8 + i] = 0.25f * (mip1[sj * 16 + si]       + mip1[sj * 16 + si + 1] +
+                                           mip1[(sj + 1) * 16 + si]  + mip1[(sj + 1) * 16 + si + 1]);
+            }
 
-        // bilinear upsample blur weights and apply per-cell weighted box blur
+        // ── per coarse cell: trilinear blur by the upsampled C weight ────────────
+        // level 0 = sharp (mip0), 1 = mip1, 2 = mip2; fractional levels lerp between.
         const float bsx = (float)(BW - 1) / (CW - 1);
         const float bsy = (float)(BH - 1) / (CH - 1);
         for (int j = 0; j < CH; j++)
         {
             float bfy = j * bsy;
-            int   bcy = (int)bfy;
-            float bty = bfy - bcy;
-            if (bcy >= BH - 1) { bcy = BH - 2; bty = 1.0f; }
-
             for (int i = 0; i < CW; i++)
             {
                 float bfx = i * bsx;
-                int   bcx = (int)bfx;
-                float btx = bfx - bcx;
-                if (bcx >= BW - 1) { bcx = BW - 2; btx = 1.0f; }
+                float cw = sampleGrid(blurC, BW, BH, bfx, bfy);
+                float level = cw * blurAmount * 2.0f; // 2.0 = BLUR_LEVELMAX
+                if (level < 0.005f) continue;
+                if (level > 1.999f) level = 1.999f;
 
-                float cw = lerpf(lerpf(blurC[ bcy      * BW + bcx], blurC[ bcy      * BW + bcx + 1], btx),
-                                 lerpf(blurC[(bcy + 1)  * BW + bcx], blurC[(bcy + 1) * BW + bcx + 1], btx), bty);
-                float w = cw * blurAmount;
-                if (w < 0.005f) continue;
-
-                float sum = 0.0f; int n = 0;
-                for (int dj = -1; dj <= 1; dj++)
-                for (int di = -1; di <= 1; di++)
+                int lo = (int)level;       // 0 or 1
+                float frac = level - lo;
+                float fx1 = i * 15.0f / (CW - 1), fy1 = j * 15.0f / (CH - 1);
+                float vLo, vHi;
+                if (lo == 0)
                 {
-                    int ni = i + di, nj = j + dj;
-                    if ((unsigned)ni < (unsigned)CW && (unsigned)nj < (unsigned)CH)
-                        { sum += coarseB[nj * CW + ni]; n++; }
+                    vLo = coarse[j * CW + i];                       // mip0 at this exact cell
+                    vHi = sampleGrid(mip1, 16, 16, fx1, fy1);
                 }
-                coarse[j * CW + i] = lerpf(coarseB[j * CW + i], sum / n, w);
+                else
+                {
+                    vLo = sampleGrid(mip1, 16, 16, fx1, fy1);
+                    vHi = sampleGrid(mip2, 8, 8, i * 7.0f / (CW - 1), j * 7.0f / (CH - 1));
+                }
+                coarse[j * CW + i] = lerpf(vLo, vHi, frac);
             }
         }
     }
@@ -391,9 +419,7 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
 
 void pushToPanel()
 {
-    for (int j = 0; j < H; j++)
-        for (int i = 0; i < W; i++)
-            matrix.drawPixel(i, j, fb[j * W + i]);
+    matrix.drawRGBBitmap(0, 0, fb, W, H);
     matrix.show();
 }
 

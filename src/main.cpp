@@ -53,12 +53,17 @@ void loop()
     float scAX = toScale(smooth[0]), scAY = toScale(smooth[1]);
     float scBX = toScale(smooth[2]), scBY = toScale(smooth[3]);
 
-    buildPaletteBlend(smooth[8] * (PALETTE_COUNT - 1));
+    static float lastPalT = -999.0f;
+    float palT = smooth[8] * (PALETTE_COUNT - 1);
+    if (fabsf(palT - lastPalT) > (1.0f / 512.0f)) {
+        buildPaletteBlend(palT);
+        lastPalT = palT;
+    }
     renderFrame(sharp, scAX, scAY, scBX, scBY, sfA, sfB, sfC, blur);
     pushToPanel();
     graphicsTick(0.008f * tscA, 0.001f * tscB, 0.004f);
 
     Serial.printf("scAX=%.2f scAY=%.2f  scBX=%.2f scBY=%.2f  tscA=%.2f tscB=%.2f  sfA=%.1f sfB=%.1f  pal=%.2f sharp=%.1f  sfC=%.1f blur=%.2f\n",
                   scAX, scAY, scBX, scBY, tscA, tscB, sfA, sfB,
-                  smooth[8] * (PALETTE_COUNT - 1), sharp, sfC, blur);
+                  palT, sharp, sfC, blur);
 }
