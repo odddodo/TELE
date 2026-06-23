@@ -11,6 +11,9 @@ void setup()
     Serial.begin(115200);
     delay(500);
 
+    pinMode(PIN_BUTTON_UP,   INPUT_PULLUP);
+    pinMode(PIN_BUTTON_DOWN, INPUT_PULLUP);
+
     // start smooth[] at mid-range so the noise looks reasonable before any packet arrives
     for (int k = 0; k < COMMS_MAX_VALS; k++) smooth[k] = 0.5f;
 
@@ -34,7 +37,23 @@ void loop()
         }
     }
 
-    // ── map all 13 pots ─────────────────────────────────────────────────────
+    // ── on-board buttons cycle symmetry mode (UP=next, DOWN=prev) ───────────
+    // modes 1–7: none, H, V, H+V, doubled-H, doubled-V, doubled-H+V
+    static int     sym      = 1;
+    static bool    upPrev   = HIGH, downPrev = HIGH;
+    static uint32_t upMs   = 0,    downMs   = 0;
+    {
+        bool upNow   = digitalRead(PIN_BUTTON_UP);
+        bool downNow = digitalRead(PIN_BUTTON_DOWN);
+        uint32_t ms  = millis();
+        if (upPrev == HIGH && upNow == LOW && ms - upMs > 200)
+            { sym = sym % 7 + 1; upMs = ms; }
+        if (downPrev == HIGH && downNow == LOW && ms - downMs > 200)
+            { sym = (sym == 1) ? 7 : sym - 1; downMs = ms; }
+        upPrev = upNow; downPrev = downNow;
+    }
+
+    // ── map remote pots ──────────────────────────────────────────────────────
     // 0–3: noise spatial scale X/Y per channel
     // 4–5: animation time scale per channel (0 = frozen)
     // 6–7: sinusoidal color-fold frequency A/B channels
@@ -61,11 +80,16 @@ void loop()
         buildPaletteBlend(palT);
         lastPalT = palT;
     }
-    renderFrame(sharp, scAX, scAY, scBX, scBY, sfA, sfB, sfC, blur);
+    static uint32_t lastFrameMs = 0;
+    uint32_t now = millis();
+    float fps = lastFrameMs ? 1000.0f / (now - lastFrameMs) : 0.0f;
+    lastFrameMs = now;
+
+    renderFrame(sharp, scAX, scAY, scBX, scBY, sfA, sfB, sfC, blur, sym);
     pushToPanel();
     graphicsTick(0.008f * tscA, 0.001f * tscB, 0.004f * tscC);
 
-    Serial.printf("scAX=%.2f scAY=%.2f  scBX=%.2f scBY=%.2f  tscA=%.2f tscB=%.2f tscC=%.2f  sfA=%.1f sfB=%.1f  pal=%.2f sharp=%.1f  sfC=%.1f blur=%.2f\n",
-                  scAX, scAY, scBX, scBY, tscA, tscB, tscC, sfA, sfB,
-                  palT, sharp, sfC, blur);
+    Serial.printf("fps=%.1f  scAX=%.2f scAY=%.2f  scBX=%.2f scBY=%.2f  tscA=%.2f tscB=%.2f tscC=%.2f  sfA=%.1f sfB=%.1f  pal=%.2f sharp=%.1f  sfC=%.1f blur=%.2f  sym=%d\n",
+                  fps, scAX, scAY, scBX, scBY, tscA, tscB, tscC, sfA, sfB,
+                  palT, sharp, sfC, blur, sym);
 }

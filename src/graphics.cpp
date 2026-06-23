@@ -21,10 +21,11 @@ void graphicsTick(float dtG, float dtQ, float dtC)
 }
 
 // ─── buffers ──────────────────────────────────────────────────────────────────
-static float    coarse[CW * CH];
-static float    mip1[16 * 16];
-static float    mip2[8 * 8];
-static float    blurC[BW * BH];   // C channel — spatially-varying blur weight
+static float coarse[CW * CH];
+static float smoothCoarse[CW * CH]; // temporal low-pass state (flicker control)
+static float mip1[16 * 16];
+static float mip2[8 * 8];
+static float blurC[BW * BH]; // C channel — spatially-varying blur weight
 static uint16_t fb[W * H];
 static uint16_t paletteLUT[256];
 static uint16_t paletteLUT2[256]; // scratch for palette blend
@@ -50,6 +51,23 @@ static inline float hash3(int x, int y, int z, uint32_t s)
 static inline float smoothf(float t) { return t * t * (3.0f - 2.0f * t); }
 static inline float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 
+#define SINLUT_N 256
+static float sinLUT[SINLUT_N + 1];
+static void buildSinLUT()
+{
+    for (int i = 0; i <= SINLUT_N; i++)
+        sinLUT[i] = sinf(TWO_PI * (float)i / SINLUT_N);
+}
+// sin(2*pi*turns) via LUT; turns must be >= 0 (always true here: A,B,C in [0,1], sf >= 0)
+static inline float fastSin(float turns)
+{
+    turns -= ffloor(turns);
+    float f = turns * SINLUT_N;
+    int i = (int)f;
+    float fr = f - i;
+    return sinLUT[i] + (sinLUT[i + 1] - sinLUT[i]) * fr;
+}
+
 static float vnoise(float x, float y, float z, uint32_t s)
 {
     int xi = ffloor(x), yi = ffloor(y), zi = ffloor(z);
@@ -67,6 +85,8 @@ static float vnoise(float x, float y, float z, uint32_t s)
 static const float SOFTXOR_W[BITPLANES] = {0.5f, 0.25f, 0.125f, 0.0625f, 0.03125f, 0.015625f};
 static const float SOFTXOR_INVNORM = 1.0f / 0.984375f; // 1 / (sum of weights, 63/64)
 static const float FBM_INVN = 1.0f / 0.9f;             // fbm n is always 0.6 + 0.3
+static const float FLICK_AMIN = 0.08f; // min smoothing when near-still (lower = calmer)
+static const float FLICK_GAIN = 40.0f; // how fast real motion re-opens the filter (higher = snappier)
 
 static inline float fbm(float x, float y, float z, uint32_t s)
 {
@@ -108,10 +128,14 @@ static inline float softXor(float a, float b, float soft)
 
 static inline float sampleGrid(const float *buf, int w, int h, float fx, float fy)
 {
-    if (fx < 0) fx = 0;
-    if (fx > w - 1) fx = w - 1;
-    if (fy < 0) fy = 0;
-    if (fy > h - 1) fy = h - 1;
+    if (fx < 0)
+        fx = 0;
+    if (fx > w - 1)
+        fx = w - 1;
+    if (fy < 0)
+        fy = 0;
+    if (fy > h - 1)
+        fy = h - 1;
     int x0 = (int)fx, y0 = (int)fy;
     int x1 = x0 + 1 < w ? x0 + 1 : x0;
     int y1 = y0 + 1 < h ? y0 + 1 : y0;
@@ -127,6 +151,17 @@ static inline uint16_t rgb565(float r, float g, float b)
     uint16_t G = (uint16_t)(g * 63) & 0x3F;
     uint16_t B = (uint16_t)(b * 31) & 0x1F;
     return (R << 11) | (G << 5) | B;
+}
+
+static inline uint16_t lerp565(uint16_t a, uint16_t b, float t)
+{
+    int ra = (a >> 11) & 0x1F, rb = (b >> 11) & 0x1F;
+    int ga = (a >> 5)  & 0x3F, gb = (b >> 5)  & 0x3F;
+    int ba =  a        & 0x1F, bb =  b        & 0x1F;
+    int r  = (int)(ra + (rb - ra) * t);
+    int g  = (int)(ga + (gb - ga) * t);
+    int bl = (int)(ba + (bb - ba) * t);
+    return (uint16_t)((r << 11) | (g << 5) | bl);
 }
 
 static inline uint16_t lerpColor(Color c0, Color c1, float dt)
@@ -159,190 +194,190 @@ static const Palette palettes[PALETTE_COUNT] = {
     {"dark-spectral", {
                           {0.000f, Col::Red},
                           {0.067f, Col::Orange},
-                          {0.133f, Col::Yellow},
+                          {0.153f, Col::Yellow},
                           {0.200f, Col::Black},
-                          {0.267f, Col::Red},
+                          {0.247f, Col::Red},
                           {0.333f, Col::Orange},
-                          {0.400f, Col::Yellow},
+                          {0.420f, Col::Yellow},
                           {0.467f, Col::Black},
-                          {0.533f, Col::Blue},
+                          {0.513f, Col::Blue},
                           {0.600f, Col::Violet},
-                          {0.667f, Col::Blue},
+                          {0.687f, Col::Blue},
                           {0.733f, Col::Black},
-                          {0.800f, Col::Violet},
+                          {0.780f, Col::Violet},
                           {0.867f, Col::Blue},
-                          {0.933f, Col::Violet},
+                          {0.953f, Col::Violet},
                           {1.000f, Col::Black},
                       },
      16},
     {"spectral", {
                      {0.000f, Col::Violet},
                      {0.067f, Col::Orange},
-                     {0.133f, Col::Cyan},
+                     {0.153f, Col::Cyan},
                      {0.200f, Col::Black},
-                     {0.267f, Col::Violet},
+                     {0.247f, Col::Violet},
                      {0.333f, Col::Orange},
-                     {0.400f, Col::Cyan},
+                     {0.420f, Col::Cyan},
                      {0.467f, Col::Black},
-                     {0.533f, Col::White},
+                     {0.513f, Col::White},
                      {0.600f, Col::DarkViolet},
-                     {0.667f, Col::White},
+                     {0.687f, Col::White},
                      {0.733f, Col::Black},
-                     {0.800f, Col::DarkViolet},
+                     {0.780f, Col::DarkViolet},
                      {0.867f, Col::White},
-                     {0.933f, Col::DarkViolet},
+                     {0.953f, Col::DarkViolet},
                      {1.000f, Col::Black},
                  },
      16},
     {"fire", {
                  {0.000f, Col::Purple},
                  {0.067f, Col::Green},
-                 {0.133f, Col::Yellow},
+                 {0.153f, Col::Yellow},
                  {0.200f, Col::Black},
-                 {0.267f, Col::Purple},
+                 {0.247f, Col::Purple},
                  {0.333f, Col::Green},
-                 {0.400f, Col::Yellow},
+                 {0.420f, Col::Yellow},
                  {0.467f, Col::Black},
-                 {0.533f, Col::Blue},
+                 {0.513f, Col::Blue},
                  {0.600f, Col::DarkViolet},
-                 {0.667f, Col::Blue},
+                 {0.687f, Col::Blue},
                  {0.733f, Col::Black},
-                 {0.800f, Col::DarkViolet},
+                 {0.780f, Col::DarkViolet},
                  {0.867f, Col::Blue},
-                 {0.933f, Col::DarkViolet},
+                 {0.953f, Col::DarkViolet},
                  {1.000f, Col::Black},
              },
      16},
     {"zebra", {
                   {0.000f, Col::White},
-                  {0.067f, 0xA9A9A9},       // DarkGrey
-                  {0.133f, Col::White},
+                  {0.067f, 0xA9A9A9}, // DarkGrey
+                  {0.153f, Col::White},
                   {0.200f, Col::Black},
-                  {0.267f, 0xA9A9A9},       // DarkGrey
+                  {0.247f, 0xA9A9A9}, // DarkGrey
                   {0.333f, Col::White},
-                  {0.400f, 0xA9A9A9},       // DarkGrey
+                  {0.420f, 0xA9A9A9}, // DarkGrey
                   {0.467f, Col::Black},
-                  {0.533f, Col::White},
-                  {0.600f, 0xA9A9A9},       // DarkGrey
-                  {0.667f, Col::White},
+                  {0.513f, Col::White},
+                  {0.600f, 0xA9A9A9}, // DarkGrey
+                  {0.687f, Col::White},
                   {0.733f, Col::Black},
-                  {0.800f, 0xA9A9A9},       // DarkGrey
+                  {0.780f, 0xA9A9A9}, // DarkGrey
                   {0.867f, Col::White},
-                  {0.933f, 0xA9A9A9},       // DarkGrey
+                  {0.953f, 0xA9A9A9}, // DarkGrey
                   {1.000f, Col::Black},
               },
      16},
     {"hello", {
                   {0.000f, Col::Red},
                   {0.067f, Col::Orange},
-                  {0.133f, Col::Yellow},
+                  {0.153f, Col::Yellow},
                   {0.200f, Col::Black},
-                  {0.267f, 0x008000},       // DarkGreen
+                  {0.247f, 0x008000}, // DarkGreen
                   {0.333f, Col::DarkBlue},
-                  {0.400f, Col::Purple},
+                  {0.420f, Col::Purple},
                   {0.467f, Col::Black},
-                  {0.533f, Col::Red},
+                  {0.513f, Col::Red},
                   {0.600f, Col::Orange},
-                  {0.667f, Col::Yellow},
+                  {0.687f, Col::Yellow},
                   {0.733f, Col::Black},
-                  {0.800f, 0x008000},       // DarkGreen
+                  {0.780f, 0x008000}, // DarkGreen
                   {0.867f, Col::DarkBlue},
-                  {0.933f, Col::Purple},
+                  {0.953f, Col::Purple},
                   {1.000f, Col::Black},
               },
      16},
     {"smoothie", {
-                     {0.000f, 0x9932CC},    // DarkOrchid
-                     {0.067f, 0x808000},    // Olive
-                     {0.133f, 0xB8860B},    // DarkGoldenrod
+                     {0.000f, 0x9932CC}, // DarkOrchid
+                     {0.067f, 0x808000}, // Olive
+                     {0.153f, 0xB8860B}, // DarkGoldenrod
                      {0.200f, Col::Black},
-                     {0.267f, 0x8B008B},    // DarkMagenta
-                     {0.333f, 0xBDB76B},    // DarkKhaki
-                     {0.400f, 0x4169E1},    // RoyalBlue
+                     {0.247f, 0x8B008B}, // DarkMagenta
+                     {0.333f, 0xBDB76B}, // DarkKhaki
+                     {0.420f, 0x4169E1}, // RoyalBlue
                      {0.467f, Col::Black},
-                     {0.533f, 0x9932CC},    // DarkOrchid
-                     {0.600f, 0x808000},    // Olive
-                     {0.667f, 0xB8860B},    // DarkGoldenrod
+                     {0.513f, 0x9932CC}, // DarkOrchid
+                     {0.600f, 0x808000}, // Olive
+                     {0.687f, 0xB8860B}, // DarkGoldenrod
                      {0.733f, Col::Black},
-                     {0.800f, 0x8B008B},    // DarkMagenta
-                     {0.867f, 0xBDB76B},    // DarkKhaki
-                     {0.933f, 0x4169E1},    // RoyalBlue
+                     {0.780f, 0x8B008B}, // DarkMagenta
+                     {0.867f, 0xBDB76B}, // DarkKhaki
+                     {0.953f, 0x4169E1}, // RoyalBlue
                      {1.000f, Col::Black},
                  },
      16},
     {"xga", {
                 {0.000f, Col::Yellow},
-                {0.067f, 0xFF00FF},         // Magenta
-                {0.133f, 0x00FFFF},         // Cyan
+                {0.067f, 0xFF00FF}, // Magenta
+                {0.153f, 0x00FFFF}, // Cyan
                 {0.200f, Col::Black},
-                {0.267f, Col::Yellow},
-                {0.333f, 0xFF00FF},         // Magenta
-                {0.400f, 0x00FFFF},         // Cyan
+                {0.247f, Col::Yellow},
+                {0.333f, 0xFF00FF}, // Magenta
+                {0.420f, 0x00FFFF}, // Cyan
                 {0.467f, Col::Black},
-                {0.533f, Col::Yellow},
-                {0.600f, 0xFF00FF},         // Magenta
-                {0.667f, 0x00FFFF},         // Cyan
+                {0.513f, Col::Yellow},
+                {0.600f, 0xFF00FF}, // Magenta
+                {0.687f, 0x00FFFF}, // Cyan
                 {0.733f, Col::Black},
-                {0.800f, Col::Yellow},
-                {0.867f, 0xFF00FF},         // Magenta
-                {0.933f, 0x00FFFF},         // Cyan
+                {0.780f, Col::Yellow},
+                {0.867f, 0xFF00FF}, // Magenta
+                {0.953f, 0x00FFFF}, // Cyan
                 {1.000f, Col::Black},
             },
      16},
     {"arctic", {
                    {0.000f, Col::White},
                    {0.067f, Col::Blue},
-                   {0.133f, Col::Red},
+                   {0.153f, Col::Red},
                    {0.200f, Col::Black},
-                   {0.267f, Col::White},
+                   {0.247f, Col::White},
                    {0.333f, Col::Blue},
-                   {0.400f, Col::Red},
+                   {0.420f, Col::Red},
                    {0.467f, Col::Black},
-                   {0.533f, Col::DarkBlue},
-                   {0.600f, 0xFFD700},      // Gold
-                   {0.667f, Col::DarkBlue},
+                   {0.513f, Col::DarkBlue},
+                   {0.600f, 0xFFD700}, // Gold
+                   {0.687f, Col::DarkBlue},
                    {0.733f, Col::Black},
-                   {0.800f, 0xFFD700},      // Gold
+                   {0.780f, 0xFFD700}, // Gold
                    {0.867f, Col::White},
-                   {0.933f, Col::Blue},
+                   {0.953f, Col::Blue},
                    {1.000f, Col::Black},
                },
      16},
     {"italy", {
                   {0.000f, Col::White},
                   {0.067f, Col::Red},
-                  {0.133f, Col::Green},
+                  {0.153f, Col::Green},
                   {0.200f, Col::Black},
-                  {0.267f, Col::White},
+                  {0.247f, Col::White},
                   {0.333f, Col::Red},
-                  {0.400f, Col::Green},
+                  {0.420f, Col::Green},
                   {0.467f, Col::Black},
-                  {0.533f, Col::White},
+                  {0.513f, Col::White},
                   {0.600f, Col::Blue},
-                  {0.667f, Col::White},
+                  {0.687f, Col::White},
                   {0.733f, Col::Black},
-                  {0.800f, Col::Blue},
+                  {0.780f, Col::Blue},
                   {0.867f, Col::White},
-                  {0.933f, Col::Blue},
+                  {0.953f, Col::Blue},
                   {1.000f, Col::Black},
               },
      16},
     {"hugme", {
-                  {0.000f, 0xFF69B4},       // HotPink
-                  {0.067f, 0x808000},       // Olive
-                  {0.133f, 0x9ACD32},       // YellowGreen
+                  {0.000f, 0xFF69B4}, // HotPink
+                  {0.067f, 0x808000}, // Olive
+                  {0.153f, 0x9ACD32}, // YellowGreen
                   {0.200f, Col::Black},
-                  {0.267f, 0xE9967A},       // DarkSalmon
-                  {0.333f, 0x808000},       // Olive
-                  {0.400f, Col::DarkBlue},
+                  {0.247f, 0xE9967A}, // DarkSalmon
+                  {0.333f, 0x808000}, // Olive
+                  {0.420f, Col::DarkBlue},
                   {0.467f, Col::Black},
-                  {0.533f, 0x9932CC},       // DarkOrchid
-                  {0.600f, 0x808000},       // Olive
-                  {0.667f, 0xB8860B},       // DarkGoldenrod
+                  {0.513f, 0x9932CC}, // DarkOrchid
+                  {0.600f, 0x808000}, // Olive
+                  {0.687f, 0xB8860B}, // DarkGoldenrod
                   {0.733f, Col::Black},
-                  {0.800f, 0x8B008B},       // DarkMagenta
-                  {0.867f, 0xBDB76B},       // DarkKhaki
-                  {0.933f, 0x4169E1},       // RoyalBlue
+                  {0.780f, 0x8B008B}, // DarkMagenta
+                  {0.867f, 0xBDB76B}, // DarkKhaki
+                  {0.953f, 0x4169E1}, // RoyalBlue
                   {1.000f, Col::Black},
               },
      16},
@@ -355,7 +390,8 @@ static void buildPaletteInto(int idx, uint16_t *lut)
     {
         float t = i / 255.0f;
         int j = 0;
-        while (j < p.n - 2 && t > p.stops[j + 1].t) j++;
+        while (j < p.n - 2 && t > p.stops[j + 1].t)
+            j++;
         float dt = (t - p.stops[j].t) / (p.stops[j + 1].t - p.stops[j].t);
         lut[i] = lerpColor(p.stops[j].c, p.stops[j + 1].c, dt);
     }
@@ -365,23 +401,24 @@ void buildPalette(int idx) { buildPaletteInto(idx, paletteLUT); }
 
 void buildPaletteBlend(float t)
 {
-    int a    = (int)t % PALETTE_COUNT;
+    int a = (int)t % PALETTE_COUNT;
     float fr = t - (int)t;
-    int b    = (a + 1) % PALETTE_COUNT;
+    int b = (a + 1) % PALETTE_COUNT;
 
     buildPaletteInto(a, paletteLUT);
-    if (fr < 0.005f) return;
+    if (fr < 0.005f)
+        return;
 
     buildPaletteInto(b, paletteLUT2);
     for (int i = 0; i < 256; i++)
     {
         uint16_t ca = paletteLUT[i], cb = paletteLUT2[i];
         int ra = (ca >> 11) & 0x1F, rb = (cb >> 11) & 0x1F;
-        int ga = (ca >>  5) & 0x3F, gb = (cb >>  5) & 0x3F;
-        int ba =  ca        & 0x1F, bb =  cb        & 0x1F;
+        int ga = (ca >> 5) & 0x3F, gb = (cb >> 5) & 0x3F;
+        int ba = ca & 0x1F, bb = cb & 0x1F;
         paletteLUT[i] = ((uint16_t)(ra + (int)(fr * (rb - ra))) << 11) |
-                        ((uint16_t)(ga + (int)(fr * (gb - ga))) <<  5) |
-                         (uint16_t)(ba + (int)(fr * (bb - ba)));
+                        ((uint16_t)(ga + (int)(fr * (gb - ga))) << 5) |
+                        (uint16_t)(ba + (int)(fr * (bb - ba)));
     }
 }
 
@@ -389,21 +426,49 @@ const char *paletteName(int idx) { return palettes[idx].name; }
 
 // ─── render ───────────────────────────────────────────────────────────────────
 void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
-                 float sfA, float sfB, float sfC, float blurAmount)
+                 float sfA, float sfB, float sfC, float blurAmount, int sym)
 {
-    // ── A/B noise → softXor at 32×32 ─────────────────────────────────────────
-    for (int j = 0; j < CH; j++)
+    // ── A/B noise → softXor (unique region only, then mirror) ────────────────
+    int uniJ = (sym == 6 || sym == 7) ? CH / 4 : (sym == 3 || sym == 4) ? CH / 2 : CH;
+    int uniI = (sym == 5 || sym == 7) ? CW / 4 : (sym == 2 || sym == 4) ? CW / 2 : CW;
+    for (int j = 0; j < uniJ; j++)
     {
         float ny = (float)j / CH;
-        for (int i = 0; i < CW; i++)
+        for (int i = 0; i < uniI; i++)
         {
             float nx = (float)i / CW;
-            float A  = fbm(nx * scAX,        ny * scAY,        gtime, 1);
-            float B  = fbm(nx * scBX + 5.2f, ny * scBY + 1.3f, qtime, 7);
-            float Aw = 0.5f + 0.5f * sinf(A * sfA * TWO_PI);
-            float Bw = 0.5f + 0.5f * sinf(B * sfB * TWO_PI);
+            float A = fbm(nx * scAX, ny * scAY, gtime, 1);
+            float B = fbm(nx * scBX + 5.2f, ny * scBY + 1.3f, qtime, 7);
+            float Aw = 0.5f + 0.5f * fastSin(A * sfA);
+            float Bw = 0.5f + 0.5f * fastSin(B * sfB);
             coarse[j * CW + i] = softXor(Aw, Bw, soft);
         }
+    }
+    // ── horizontal mirror ─────────────────────────────────────────────────────
+    if (sym == 5 || sym == 7) // step 1: inner half → CW/4..CW/2-1
+    {
+        for (int j = 0; j < uniJ; j++)
+            for (int i = 0; i < CW / 4; i++)
+                coarse[j * CW + (CW / 2 - 1 - i)] = coarse[j * CW + i];
+    }
+    if (sym == 2 || sym == 4 || sym == 5 || sym == 7) // left half → right half
+    {
+        for (int j = 0; j < uniJ; j++)
+            for (int i = 0; i < CW / 2; i++)
+                coarse[j * CW + (CW - 1 - i)] = coarse[j * CW + i];
+    }
+    // ── vertical mirror ───────────────────────────────────────────────────────
+    if (sym == 6 || sym == 7) // step 1: inner half → CH/4..CH/2-1
+    {
+        for (int j = 0; j < CH / 4; j++)
+            for (int i = 0; i < CW; i++)
+                coarse[(CH / 2 - 1 - j) * CW + i] = coarse[j * CW + i];
+    }
+    if (sym == 3 || sym == 4 || sym == 6 || sym == 7) // top half → bottom half
+    {
+        for (int j = 0; j < CH / 2; j++)
+            for (int i = 0; i < CW; i++)
+                coarse[(CH - 1 - j) * CW + i] = coarse[j * CW + i];
     }
 
     // ── C channel blur at 16×16 → spatially-varying smooth ───────────────────
@@ -416,8 +481,8 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
             for (int i = 0; i < BW; i++)
             {
                 float nx = (float)i / BW;
-                float C  = fbm(nx * 1.5f, ny * 1.5f, btime, 13);
-                float cw = sinf(C * sfC * TWO_PI) * 3.0f;
+                float C = fbm(nx * 1.5f, ny * 1.5f, btime, 13);
+                float cw = fastSin(C * sfC) * 3.0f;
                 cw = cw < -1.0f ? -1.0f : (cw > 1.0f ? 1.0f : cw);
                 blurC[j * BW + i] = 0.5f + 0.5f * cw;
             }
@@ -428,15 +493,15 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
             for (int i = 0; i < 16; i++)
             {
                 int si = 2 * i, sj = 2 * j;
-                mip1[j * 16 + i] = 0.25f * (coarse[sj * CW + si]       + coarse[sj * CW + si + 1] +
-                                            coarse[(sj + 1) * CW + si]  + coarse[(sj + 1) * CW + si + 1]);
+                mip1[j * 16 + i] = 0.25f * (coarse[sj * CW + si] + coarse[sj * CW + si + 1] +
+                                            coarse[(sj + 1) * CW + si] + coarse[(sj + 1) * CW + si + 1]);
             }
         for (int j = 0; j < 8; j++)
             for (int i = 0; i < 8; i++)
             {
                 int si = 2 * i, sj = 2 * j;
-                mip2[j * 8 + i] = 0.25f * (mip1[sj * 16 + si]       + mip1[sj * 16 + si + 1] +
-                                           mip1[(sj + 1) * 16 + si]  + mip1[(sj + 1) * 16 + si + 1]);
+                mip2[j * 8 + i] = 0.25f * (mip1[sj * 16 + si] + mip1[sj * 16 + si + 1] +
+                                           mip1[(sj + 1) * 16 + si] + mip1[(sj + 1) * 16 + si + 1]);
             }
 
         // ── per coarse cell: trilinear blur by the upsampled C weight ────────────
@@ -451,16 +516,18 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
                 float bfx = i * bsx;
                 float cw = sampleGrid(blurC, BW, BH, bfx, bfy);
                 float level = cw * blurAmount * 2.0f; // 2.0 = BLUR_LEVELMAX
-                if (level < 0.005f) continue;
-                if (level > 1.999f) level = 1.999f;
+                if (level < 0.005f)
+                    continue;
+                if (level > 1.999f)
+                    level = 1.999f;
 
-                int lo = (int)level;       // 0 or 1
+                int lo = (int)level; // 0 or 1
                 float frac = level - lo;
                 float fx1 = i * 15.0f / (CW - 1), fy1 = j * 15.0f / (CH - 1);
                 float vLo, vHi;
                 if (lo == 0)
                 {
-                    vLo = coarse[j * CW + i];                       // mip0 at this exact cell
+                    vLo = coarse[j * CW + i]; // mip0 at this exact cell
                     vHi = sampleGrid(mip1, 16, 16, fx1, fy1);
                 }
                 else
@@ -471,6 +538,16 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
                 coarse[j * CW + i] = lerpf(vLo, vHi, frac);
             }
         }
+    }
+
+    // ── temporal low-pass: calm low-timescale flicker, stay UI-responsive ────────
+    for (int p = 0; p < CW * CH; p++)
+    {
+        float d  = coarse[p] - smoothCoarse[p];
+        float ad = d < 0 ? -d : d;
+        float g  = ad * FLICK_GAIN;
+        float alpha = FLICK_AMIN + (1.0f - FLICK_AMIN) * (g > 1.0f ? 1.0f : g);
+        smoothCoarse[p] += alpha * d;
     }
 
     const float sx = (float)(CW - 1) / (W - 1);
@@ -485,7 +562,7 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
             cy = CH - 2;
             ty = 1.0f;
         }
-        const float *row0 = coarse + cy * CW;
+        const float *row0 = smoothCoarse + cy * CW;
         const float *row1 = row0 + CW;
         for (int i = 0; i < W; i++)
         {
@@ -500,9 +577,11 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
             float v0 = lerpf(row0[cx], row0[cx + 1], tx);
             float v1 = lerpf(row1[cx], row1[cx + 1], tx);
             float val = lerpf(v0, v1, ty);
-            int idx = (int)(val * 255.0f);
-            idx = idx < 0 ? 0 : (idx > 255 ? 255 : idx);
-            fb[j * W + i] = paletteLUT[idx];
+            float fidx = val * 255.0f;
+            fidx = fidx < 0 ? 0 : (fidx > 255.0f ? 255.0f : fidx);
+            int i0 = (int)fidx;
+            int i1 = i0 < 255 ? i0 + 1 : i0;
+            fb[j * W + i] = lerp565(paletteLUT[i0], paletteLUT[i1], fidx - i0);
         }
     }
 }
@@ -521,5 +600,6 @@ void graphicsInit(int paletteIdx)
     if (s != PROTOMATTER_OK)
         for (;;)
             ;
+    buildSinLUT();
     buildPalette(paletteIdx);
 }

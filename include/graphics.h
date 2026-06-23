@@ -57,7 +57,7 @@ void graphicsInit(int paletteIdx);
 void buildPalette(int idx);
 void buildPaletteBlend(float t); // t = paletteIdx + pot fraction → blends two adjacent palettes
 void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
-                 float sfA, float sfB, float sfC, float blurAmount);
+                 float sfA, float sfB, float sfC, float blurAmount, int sym);
 void pushToPanel();
 void graphicsTick(float dtG, float dtQ, float dtC); // advance gtime / qtime / ctime
 const char *paletteName(int idx);
