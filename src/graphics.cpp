@@ -190,194 +190,196 @@ struct Palette
     int n;
 };
 
+// Each triplet between blacks: [deep-navy, mid, brightest] at stops {0,4,8,12}, {1,5,9,13}, {2,6,10,14}.
+// Deep-navy (0x000066) is at gap 0.020 from each adjacent black (was 0.047) → narrow blue spike.
 static const Palette palettes[PALETTE_COUNT] = {
     {"dark-spectral", {
-                          {0.000f, Col::Red},
-                          {0.067f, Col::Orange},
+                          {0.000f, 0x000066}, // deep navy
+                          {0.020f, Col::Red},
                           {0.153f, Col::Yellow},
                           {0.200f, Col::Black},
-                          {0.247f, Col::Red},
+                          {0.220f, 0x000066}, // deep navy
                           {0.333f, Col::Orange},
                           {0.420f, Col::Yellow},
                           {0.467f, Col::Black},
-                          {0.513f, Col::Blue},
+                          {0.487f, 0x000066}, // deep navy
                           {0.600f, Col::Violet},
-                          {0.687f, Col::Blue},
+                          {0.687f, Col::Yellow},
                           {0.733f, Col::Black},
-                          {0.780f, Col::Violet},
-                          {0.867f, Col::Blue},
-                          {0.953f, Col::Violet},
+                          {0.753f, 0x000066}, // deep navy
+                          {0.867f, Col::Orange},
+                          {0.953f, Col::Yellow},
                           {1.000f, Col::Black},
                       },
      16},
     {"spectral", {
-                     {0.000f, Col::Violet},
-                     {0.067f, Col::Orange},
-                     {0.153f, Col::Cyan},
+                     {0.000f, 0x000066}, // deep navy
+                     {0.020f, Col::Violet},
+                     {0.153f, Col::White},
                      {0.200f, Col::Black},
-                     {0.247f, Col::Violet},
+                     {0.220f, 0x000066}, // deep navy
                      {0.333f, Col::Orange},
-                     {0.420f, Col::Cyan},
+                     {0.420f, Col::White},
                      {0.467f, Col::Black},
-                     {0.513f, Col::White},
-                     {0.600f, Col::DarkViolet},
+                     {0.487f, 0x000066}, // deep navy
+                     {0.600f, Col::Cyan},
                      {0.687f, Col::White},
                      {0.733f, Col::Black},
-                     {0.780f, Col::DarkViolet},
-                     {0.867f, Col::White},
-                     {0.953f, Col::DarkViolet},
+                     {0.753f, 0x000066}, // deep navy
+                     {0.867f, Col::Violet},
+                     {0.953f, Col::White},
                      {1.000f, Col::Black},
                  },
      16},
     {"fire", {
-                 {0.000f, Col::Purple},
-                 {0.067f, Col::Green},
+                 {0.000f, 0x000066}, // deep navy
+                 {0.020f, Col::Green},
                  {0.153f, Col::Yellow},
                  {0.200f, Col::Black},
-                 {0.247f, Col::Purple},
-                 {0.333f, Col::Green},
+                 {0.220f, 0x000066}, // deep navy
+                 {0.333f, Col::Purple},
                  {0.420f, Col::Yellow},
                  {0.467f, Col::Black},
-                 {0.513f, Col::Blue},
+                 {0.487f, 0x000066}, // deep navy
                  {0.600f, Col::DarkViolet},
-                 {0.687f, Col::Blue},
+                 {0.687f, Col::Yellow},
                  {0.733f, Col::Black},
-                 {0.780f, Col::DarkViolet},
-                 {0.867f, Col::Blue},
-                 {0.953f, Col::DarkViolet},
+                 {0.753f, 0x000066}, // deep navy
+                 {0.867f, Col::Green},
+                 {0.953f, Col::Yellow},
                  {1.000f, Col::Black},
              },
      16},
-    {"zebra", {
-                  {0.000f, Col::White},
-                  {0.067f, 0xA9A9A9}, // DarkGrey
+    {"zebra", {                           // no blue → deep navy added
+                  {0.000f, 0x000066}, // deep navy
+                  {0.020f, 0xA9A9A9}, // DarkGrey
                   {0.153f, Col::White},
                   {0.200f, Col::Black},
-                  {0.247f, 0xA9A9A9}, // DarkGrey
-                  {0.333f, Col::White},
-                  {0.420f, 0xA9A9A9}, // DarkGrey
+                  {0.220f, 0x000066}, // deep navy
+                  {0.333f, 0xA9A9A9}, // DarkGrey
+                  {0.420f, Col::White},
                   {0.467f, Col::Black},
-                  {0.513f, Col::White},
+                  {0.487f, 0x000066}, // deep navy
                   {0.600f, 0xA9A9A9}, // DarkGrey
                   {0.687f, Col::White},
                   {0.733f, Col::Black},
-                  {0.780f, 0xA9A9A9}, // DarkGrey
-                  {0.867f, Col::White},
-                  {0.953f, 0xA9A9A9}, // DarkGrey
+                  {0.753f, 0x000066}, // deep navy
+                  {0.867f, 0xA9A9A9}, // DarkGrey
+                  {0.953f, Col::White},
                   {1.000f, Col::Black},
               },
      16},
     {"hello", {
-                  {0.000f, Col::Red},
-                  {0.067f, Col::Orange},
+                  {0.000f, 0x000066}, // deep navy
+                  {0.020f, Col::Red},
                   {0.153f, Col::Yellow},
                   {0.200f, Col::Black},
-                  {0.247f, 0x008000}, // DarkGreen
-                  {0.333f, Col::DarkBlue},
-                  {0.420f, Col::Purple},
+                  {0.220f, 0x000066}, // deep navy
+                  {0.333f, Col::Orange},
+                  {0.420f, Col::Yellow},
                   {0.467f, Col::Black},
-                  {0.513f, Col::Red},
-                  {0.600f, Col::Orange},
+                  {0.487f, 0x000066}, // deep navy
+                  {0.600f, 0x008000}, // DarkGreen
                   {0.687f, Col::Yellow},
                   {0.733f, Col::Black},
-                  {0.780f, 0x008000}, // DarkGreen
-                  {0.867f, Col::DarkBlue},
-                  {0.953f, Col::Purple},
+                  {0.753f, 0x000066}, // deep navy
+                  {0.867f, Col::Purple},
+                  {0.953f, Col::Yellow},
                   {1.000f, Col::Black},
               },
      16},
     {"smoothie", {
-                     {0.000f, 0x9932CC}, // DarkOrchid
-                     {0.067f, 0x808000}, // Olive
-                     {0.153f, 0xB8860B}, // DarkGoldenrod
+                     {0.000f, 0x000066}, // deep navy
+                     {0.020f, 0x9932CC}, // DarkOrchid
+                     {0.153f, 0xBDB76B}, // DarkKhaki (brightest)
                      {0.200f, Col::Black},
-                     {0.247f, 0x8B008B}, // DarkMagenta
-                     {0.333f, 0xBDB76B}, // DarkKhaki
-                     {0.420f, 0x4169E1}, // RoyalBlue
+                     {0.220f, 0x000066}, // deep navy
+                     {0.333f, 0x808000}, // Olive
+                     {0.420f, 0xBDB76B}, // DarkKhaki
                      {0.467f, Col::Black},
-                     {0.513f, 0x9932CC}, // DarkOrchid
-                     {0.600f, 0x808000}, // Olive
-                     {0.687f, 0xB8860B}, // DarkGoldenrod
+                     {0.487f, 0x000066}, // deep navy
+                     {0.600f, 0xB8860B}, // DarkGoldenrod
+                     {0.687f, 0xBDB76B}, // DarkKhaki
                      {0.733f, Col::Black},
-                     {0.780f, 0x8B008B}, // DarkMagenta
-                     {0.867f, 0xBDB76B}, // DarkKhaki
-                     {0.953f, 0x4169E1}, // RoyalBlue
+                     {0.753f, 0x000066}, // deep navy
+                     {0.867f, 0x8B008B}, // DarkMagenta
+                     {0.953f, 0xBDB76B}, // DarkKhaki
                      {1.000f, Col::Black},
                  },
      16},
-    {"xga", {
-                {0.000f, Col::Yellow},
-                {0.067f, 0xFF00FF}, // Magenta
-                {0.153f, 0x00FFFF}, // Cyan
+    {"xga", {                             // deep navy replaces Cyan at black boundary
+                {0.000f, 0x000066}, // deep navy
+                {0.020f, 0xFF00FF}, // Magenta
+                {0.153f, Col::Yellow},
                 {0.200f, Col::Black},
-                {0.247f, Col::Yellow},
+                {0.220f, 0x000066}, // deep navy
                 {0.333f, 0xFF00FF}, // Magenta
-                {0.420f, 0x00FFFF}, // Cyan
+                {0.420f, Col::Yellow},
                 {0.467f, Col::Black},
-                {0.513f, Col::Yellow},
+                {0.487f, 0x000066}, // deep navy
                 {0.600f, 0xFF00FF}, // Magenta
-                {0.687f, 0x00FFFF}, // Cyan
+                {0.687f, Col::Yellow},
                 {0.733f, Col::Black},
-                {0.780f, Col::Yellow},
+                {0.753f, 0x000066}, // deep navy
                 {0.867f, 0xFF00FF}, // Magenta
-                {0.953f, 0x00FFFF}, // Cyan
+                {0.953f, Col::Yellow},
                 {1.000f, Col::Black},
             },
      16},
     {"arctic", {
-                   {0.000f, Col::White},
-                   {0.067f, Col::Blue},
-                   {0.153f, Col::Red},
+                   {0.000f, 0x000066}, // deep navy
+                   {0.020f, Col::Red},
+                   {0.153f, Col::White},
                    {0.200f, Col::Black},
-                   {0.247f, Col::White},
+                   {0.220f, 0x000066}, // deep navy
                    {0.333f, Col::Blue},
-                   {0.420f, Col::Red},
+                   {0.420f, Col::White},
                    {0.467f, Col::Black},
-                   {0.513f, Col::DarkBlue},
+                   {0.487f, 0x000066}, // deep navy
                    {0.600f, 0xFFD700}, // Gold
-                   {0.687f, Col::DarkBlue},
+                   {0.687f, Col::White},
                    {0.733f, Col::Black},
-                   {0.780f, 0xFFD700}, // Gold
-                   {0.867f, Col::White},
-                   {0.953f, Col::Blue},
+                   {0.753f, 0x000066}, // deep navy
+                   {0.867f, Col::Red},
+                   {0.953f, Col::White},
                    {1.000f, Col::Black},
                },
      16},
     {"italy", {
-                  {0.000f, Col::White},
-                  {0.067f, Col::Red},
-                  {0.153f, Col::Green},
+                  {0.000f, 0x000066}, // deep navy
+                  {0.020f, Col::Red},
+                  {0.153f, Col::White},
                   {0.200f, Col::Black},
-                  {0.247f, Col::White},
-                  {0.333f, Col::Red},
-                  {0.420f, Col::Green},
+                  {0.220f, 0x000066}, // deep navy
+                  {0.333f, Col::Green},
+                  {0.420f, Col::White},
                   {0.467f, Col::Black},
-                  {0.513f, Col::White},
-                  {0.600f, Col::Blue},
+                  {0.487f, 0x000066}, // deep navy
+                  {0.600f, Col::Red},
                   {0.687f, Col::White},
                   {0.733f, Col::Black},
-                  {0.780f, Col::Blue},
-                  {0.867f, Col::White},
-                  {0.953f, Col::Blue},
+                  {0.753f, 0x000066}, // deep navy
+                  {0.867f, Col::Green},
+                  {0.953f, Col::White},
                   {1.000f, Col::Black},
               },
      16},
     {"hugme", {
-                  {0.000f, 0xFF69B4}, // HotPink
-                  {0.067f, 0x808000}, // Olive
-                  {0.153f, 0x9ACD32}, // YellowGreen
+                  {0.000f, 0x000066}, // deep navy
+                  {0.020f, 0x808000}, // Olive
+                  {0.153f, 0xFF69B4}, // HotPink (brightest)
                   {0.200f, Col::Black},
-                  {0.247f, 0xE9967A}, // DarkSalmon
-                  {0.333f, 0x808000}, // Olive
-                  {0.420f, Col::DarkBlue},
+                  {0.220f, 0x000066}, // deep navy
+                  {0.333f, 0x9ACD32}, // YellowGreen
+                  {0.420f, 0xFF69B4}, // HotPink
                   {0.467f, Col::Black},
-                  {0.513f, 0x9932CC}, // DarkOrchid
-                  {0.600f, 0x808000}, // Olive
-                  {0.687f, 0xB8860B}, // DarkGoldenrod
+                  {0.487f, 0x000066}, // deep navy
+                  {0.600f, 0x9932CC}, // DarkOrchid
+                  {0.687f, 0xFF69B4}, // HotPink
                   {0.733f, Col::Black},
-                  {0.780f, 0x8B008B}, // DarkMagenta
-                  {0.867f, 0xBDB76B}, // DarkKhaki
-                  {0.953f, 0x4169E1}, // RoyalBlue
+                  {0.753f, 0x000066}, // deep navy
+                  {0.867f, 0xB8860B}, // DarkGoldenrod
+                  {0.953f, 0xFF69B4}, // HotPink
                   {1.000f, Col::Black},
               },
      16},
