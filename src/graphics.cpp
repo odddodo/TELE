@@ -151,111 +151,201 @@ struct Stop
 struct Palette
 {
     const char *name;
-    Stop stops[8];
+    Stop stops[16];
     int n;
 };
 
 static const Palette palettes[PALETTE_COUNT] = {
     {"dark-spectral", {
                           {0.000f, Col::Red},
-                          {0.167f, Col::Orange},
-                          {0.333f, Col::Yellow},
-                          {0.500f, Col::Black},
+                          {0.067f, Col::Orange},
+                          {0.133f, Col::Yellow},
+                          {0.200f, Col::Black},
+                          {0.267f, Col::Red},
+                          {0.333f, Col::Orange},
+                          {0.400f, Col::Yellow},
+                          {0.467f, Col::Black},
+                          {0.533f, Col::Blue},
+                          {0.600f, Col::Violet},
                           {0.667f, Col::Blue},
-                          {0.833f, Col::Violet},
+                          {0.733f, Col::Black},
+                          {0.800f, Col::Violet},
+                          {0.867f, Col::Blue},
+                          {0.933f, Col::Violet},
                           {1.000f, Col::Black},
                       },
-     7},
+     16},
     {"spectral", {
                      {0.000f, Col::Violet},
-                     {0.167f, Col::Orange},
-                     {0.333f, Col::Cyan},
-                     {0.500f, Col::Black},
+                     {0.067f, Col::Orange},
+                     {0.133f, Col::Cyan},
+                     {0.200f, Col::Black},
+                     {0.267f, Col::Violet},
+                     {0.333f, Col::Orange},
+                     {0.400f, Col::Cyan},
+                     {0.467f, Col::Black},
+                     {0.533f, Col::White},
+                     {0.600f, Col::DarkViolet},
                      {0.667f, Col::White},
-                     {0.833f, Col::DarkViolet},
+                     {0.733f, Col::Black},
+                     {0.800f, Col::DarkViolet},
+                     {0.867f, Col::White},
+                     {0.933f, Col::DarkViolet},
                      {1.000f, Col::Black},
                  },
-     7},
+     16},
     {"fire", {
                  {0.000f, Col::Purple},
-                 {0.167f, Col::Green},
-                 {0.333f, Col::Yellow},
-                 {0.500f, Col::Black},
+                 {0.067f, Col::Green},
+                 {0.133f, Col::Yellow},
+                 {0.200f, Col::Black},
+                 {0.267f, Col::Purple},
+                 {0.333f, Col::Green},
+                 {0.400f, Col::Yellow},
+                 {0.467f, Col::Black},
+                 {0.533f, Col::Blue},
+                 {0.600f, Col::DarkViolet},
                  {0.667f, Col::Blue},
-                 {0.833f, Col::DarkViolet},
+                 {0.733f, Col::Black},
+                 {0.800f, Col::DarkViolet},
+                 {0.867f, Col::Blue},
+                 {0.933f, Col::DarkViolet},
                  {1.000f, Col::Black},
              },
-     7},
-    {"cold", {
-                 {0.000f, Col::Cyan},
-                 {0.167f, Col::Blue},
-                 {0.333f, Col::DarkBlue},
-                 {0.500f, Col::Black},
-                 {0.667f, Col::Violet},
-                 {0.833f, Col::Purple},
-                 {1.000f, Col::Black},
-             },
-     7},
-    {"nature", {
-                   {0.000f, Col::Yellow},
-                   {0.167f, 0x66E500},      // yellow-green
-                   {0.333f, Col::Green},
-                   {0.500f, Col::Black},
-                   {0.667f, 0x00B219},      // forest green
-                   {0.833f, Col::DarkGreen},
-                   {1.000f, Col::Black},
-               },
-     7},
-    {"ember", {
-                  {0.000f, Col::Yellow},
-                  {0.167f, Col::Orange},
-                  {0.333f, Col::Red},
-                  {0.500f, Col::Black},
-                  {0.667f, Col::DarkRed},
-                  {0.833f, 0x330000},       // near-black red
+     16},
+    {"zebra", {
+                  {0.000f, Col::White},
+                  {0.067f, 0xA9A9A9},       // DarkGrey
+                  {0.133f, Col::White},
+                  {0.200f, Col::Black},
+                  {0.267f, 0xA9A9A9},       // DarkGrey
+                  {0.333f, Col::White},
+                  {0.400f, 0xA9A9A9},       // DarkGrey
+                  {0.467f, Col::Black},
+                  {0.533f, Col::White},
+                  {0.600f, 0xA9A9A9},       // DarkGrey
+                  {0.667f, Col::White},
+                  {0.733f, Col::Black},
+                  {0.800f, 0xA9A9A9},       // DarkGrey
+                  {0.867f, Col::White},
+                  {0.933f, 0xA9A9A9},       // DarkGrey
                   {1.000f, Col::Black},
               },
-     7},
-    {"dusk", {
-                 {0.000f, Col::White},
-                 {0.167f, Col::Gray},
-                 {0.333f, Col::Cyan},
-                 {0.500f, Col::Black},
-                 {0.667f, Col::DarkBlue},
-                 {0.833f, 0x000033},        // near-black blue
-                 {1.000f, Col::Black},
-             },
-     7},
-    {"neon", {
-                 {0.000f, 0xFF0080},        // hot pink
-                 {0.167f, Col::Violet},
-                 {0.333f, Col::Blue},
-                 {0.500f, Col::Black},
-                 {0.667f, Col::Cyan},
-                 {0.833f, Col::Green},
-                 {1.000f, Col::Black},
-             },
-     7},
-    {"rose", {
-                 {0.000f, Col::White},
-                 {0.167f, 0xFFCCFF},        // pale lavender
-                 {0.333f, 0xFF99CC},        // soft pink
-                 {0.500f, Col::Black},
-                 {0.667f, 0xFF0080},        // hot pink
-                 {0.833f, Col::Purple},
-                 {1.000f, Col::Black},
-             },
-     7},
-    {"gold", {
-                 {0.000f, Col::White},
-                 {0.167f, 0xFFFF80},        // pale yellow
-                 {0.333f, Col::Yellow},
-                 {0.500f, Col::Black},
-                 {0.667f, Col::Orange},
-                 {0.833f, 0xFF6600},        // deep orange
-                 {1.000f, Col::Black},
-             },
-     7},
+     16},
+    {"hello", {
+                  {0.000f, Col::Red},
+                  {0.067f, Col::Orange},
+                  {0.133f, Col::Yellow},
+                  {0.200f, Col::Black},
+                  {0.267f, 0x008000},       // DarkGreen
+                  {0.333f, Col::DarkBlue},
+                  {0.400f, Col::Purple},
+                  {0.467f, Col::Black},
+                  {0.533f, Col::Red},
+                  {0.600f, Col::Orange},
+                  {0.667f, Col::Yellow},
+                  {0.733f, Col::Black},
+                  {0.800f, 0x008000},       // DarkGreen
+                  {0.867f, Col::DarkBlue},
+                  {0.933f, Col::Purple},
+                  {1.000f, Col::Black},
+              },
+     16},
+    {"smoothie", {
+                     {0.000f, 0x9932CC},    // DarkOrchid
+                     {0.067f, 0x808000},    // Olive
+                     {0.133f, 0xB8860B},    // DarkGoldenrod
+                     {0.200f, Col::Black},
+                     {0.267f, 0x8B008B},    // DarkMagenta
+                     {0.333f, 0xBDB76B},    // DarkKhaki
+                     {0.400f, 0x4169E1},    // RoyalBlue
+                     {0.467f, Col::Black},
+                     {0.533f, 0x9932CC},    // DarkOrchid
+                     {0.600f, 0x808000},    // Olive
+                     {0.667f, 0xB8860B},    // DarkGoldenrod
+                     {0.733f, Col::Black},
+                     {0.800f, 0x8B008B},    // DarkMagenta
+                     {0.867f, 0xBDB76B},    // DarkKhaki
+                     {0.933f, 0x4169E1},    // RoyalBlue
+                     {1.000f, Col::Black},
+                 },
+     16},
+    {"xga", {
+                {0.000f, Col::Yellow},
+                {0.067f, 0xFF00FF},         // Magenta
+                {0.133f, 0x00FFFF},         // Cyan
+                {0.200f, Col::Black},
+                {0.267f, Col::Yellow},
+                {0.333f, 0xFF00FF},         // Magenta
+                {0.400f, 0x00FFFF},         // Cyan
+                {0.467f, Col::Black},
+                {0.533f, Col::Yellow},
+                {0.600f, 0xFF00FF},         // Magenta
+                {0.667f, 0x00FFFF},         // Cyan
+                {0.733f, Col::Black},
+                {0.800f, Col::Yellow},
+                {0.867f, 0xFF00FF},         // Magenta
+                {0.933f, 0x00FFFF},         // Cyan
+                {1.000f, Col::Black},
+            },
+     16},
+    {"arctic", {
+                   {0.000f, Col::White},
+                   {0.067f, Col::Blue},
+                   {0.133f, Col::Red},
+                   {0.200f, Col::Black},
+                   {0.267f, Col::White},
+                   {0.333f, Col::Blue},
+                   {0.400f, Col::Red},
+                   {0.467f, Col::Black},
+                   {0.533f, Col::DarkBlue},
+                   {0.600f, 0xFFD700},      // Gold
+                   {0.667f, Col::DarkBlue},
+                   {0.733f, Col::Black},
+                   {0.800f, 0xFFD700},      // Gold
+                   {0.867f, Col::White},
+                   {0.933f, Col::Blue},
+                   {1.000f, Col::Black},
+               },
+     16},
+    {"italy", {
+                  {0.000f, Col::White},
+                  {0.067f, Col::Red},
+                  {0.133f, Col::Green},
+                  {0.200f, Col::Black},
+                  {0.267f, Col::White},
+                  {0.333f, Col::Red},
+                  {0.400f, Col::Green},
+                  {0.467f, Col::Black},
+                  {0.533f, Col::White},
+                  {0.600f, Col::Blue},
+                  {0.667f, Col::White},
+                  {0.733f, Col::Black},
+                  {0.800f, Col::Blue},
+                  {0.867f, Col::White},
+                  {0.933f, Col::Blue},
+                  {1.000f, Col::Black},
+              },
+     16},
+    {"hugme", {
+                  {0.000f, 0xFF69B4},       // HotPink
+                  {0.067f, 0x808000},       // Olive
+                  {0.133f, 0x9ACD32},       // YellowGreen
+                  {0.200f, Col::Black},
+                  {0.267f, 0xE9967A},       // DarkSalmon
+                  {0.333f, 0x808000},       // Olive
+                  {0.400f, Col::DarkBlue},
+                  {0.467f, Col::Black},
+                  {0.533f, 0x9932CC},       // DarkOrchid
+                  {0.600f, 0x808000},       // Olive
+                  {0.667f, 0xB8860B},       // DarkGoldenrod
+                  {0.733f, Col::Black},
+                  {0.800f, 0x8B008B},       // DarkMagenta
+                  {0.867f, 0xBDB76B},       // DarkKhaki
+                  {0.933f, 0x4169E1},       // RoyalBlue
+                  {1.000f, Col::Black},
+              },
+     16},
 };
 
 static void buildPaletteInto(int idx, uint16_t *lut)
