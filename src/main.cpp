@@ -34,7 +34,7 @@ void loop()
         }
     }
 
-    // ── map all 12 pots ─────────────────────────────────────────────────────
+    // ── map all 13 pots ─────────────────────────────────────────────────────
     // 0–3: noise spatial scale X/Y per channel
     // 4–5: animation time scale per channel (0 = frozen)
     // 6–7: sinusoidal color-fold frequency A/B channels
@@ -42,8 +42,10 @@ void loop()
     // 9:   softXor sharpness
     // 10:  sin fold frequency blur channel C
     // 11:  blur amount (0 = off, 1 = full)
+    // 12:  blur channel time scale (0 = frozen, matches tscA/tscB behaviour)
     float tscA  = smooth[4] * TSCALE_MAX;
     float tscB  = smooth[5] * TSCALE_MAX;
+    float tscC  = smooth[12] * TSCALE_MAX;
     float sfA   = SF_MIN  + smooth[6]  * (SF_MAX  - SF_MIN);
     float sfB   = SF_MIN  + smooth[7]  * (SF_MAX  - SF_MIN);
     float sfC   = SFC_MIN + smooth[10] * (SFC_MAX - SFC_MIN);
@@ -61,9 +63,9 @@ void loop()
     }
     renderFrame(sharp, scAX, scAY, scBX, scBY, sfA, sfB, sfC, blur);
     pushToPanel();
-    graphicsTick(0.008f * tscA, 0.001f * tscB, 0.004f);
+    graphicsTick(0.008f * tscA, 0.001f * tscB, 0.004f * tscC);
 
-    Serial.printf("scAX=%.2f scAY=%.2f  scBX=%.2f scBY=%.2f  tscA=%.2f tscB=%.2f  sfA=%.1f sfB=%.1f  pal=%.2f sharp=%.1f  sfC=%.1f blur=%.2f\n",
-                  scAX, scAY, scBX, scBY, tscA, tscB, sfA, sfB,
+    Serial.printf("scAX=%.2f scAY=%.2f  scBX=%.2f scBY=%.2f  tscA=%.2f tscB=%.2f tscC=%.2f  sfA=%.1f sfB=%.1f  pal=%.2f sharp=%.1f  sfC=%.1f blur=%.2f\n",
+                  scAX, scAY, scBX, scBY, tscA, tscB, tscC, sfA, sfB,
                   palT, sharp, sfC, blur);
 }
