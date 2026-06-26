@@ -51,6 +51,16 @@ static const float SFC_MIN = 0.01f; // pot 10   sin fold frequency blur channel 
 static const float SFC_MAX = 10.0f;
                                     // pot 11   blur amount 0–1 (no separate constant needed)
 
+// ─── glitch (pot 13) ──────────────────────────────────────────────────────────
+static const int     MAXSHIFT_H    = 24;     // px, max horizontal row displacement @ g=1
+static const int     MAXSHIFT_V    = 24;     // px, max vertical column displacement @ g=1
+static const int     MAXCHROMA     = 6;      // px, max R/B split @ g=1
+static const float   VERT_ONSET    = 0.45f;  // g where vertical tearing starts
+static const float   CHROMA_ONSET  = 0.55f;  // g where chromatic split starts
+static const float   COLOR_ONSET   = 0.50f;  // g where index corruption starts
+static const uint8_t XOR_PATTERN   = 0xC0;   // palette-index xor mask (jumps palette region)
+static const float   LATCH_DEADBAND = 0.004f; // |Δsmooth[13]| above this = "turning"
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 void graphicsInit(int paletteIdx);
@@ -58,6 +68,8 @@ void buildPalette(int idx);
 void buildPaletteBlend(float t); // t = paletteIdx + pot fraction → blends two adjacent palettes
 void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
                  float sfA, float sfB, float sfC, float blurAmount, int sym);
+void glitchUpdate(float g, bool moving); // latch tables from smoothCoarse when moving; always stores g
+void glitchApply();                      // combined-gather geometry pass on fb (call after renderFrame)
 void pushToPanel();
 void graphicsTick(float dtG, float dtQ, float dtC); // advance gtime / qtime / ctime
 const char *paletteName(int idx);

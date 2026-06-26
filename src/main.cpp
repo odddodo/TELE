@@ -57,6 +57,7 @@ void loop()
     // 10:  sin fold frequency blur channel C
     // 11:  blur amount (0 = off, 1 = full)
     // 12:  blur channel time scale (0 = frozen, matches tscA/tscB behaviour)
+    // 13:  glitch amount (0 = clean, 1 = full mayhem; latch triggered by knob motion)
     // 14:  horizontal symmetry (none / mirror / doubled)
     // 15:  vertical symmetry  (none / mirror / doubled)
     float tscA  = smooth[4] * TSCALE_MAX;
@@ -82,7 +83,15 @@ void loop()
     float fps = lastFrameMs ? 1000.0f / (now - lastFrameMs) : 0.0f;
     lastFrameMs = now;
 
+    // ── pot 13 → glitch amount + latch trigger ─────────────────────────────────
+    float gGlitch = smooth[13];
+    static float prevG13 = 0.0f;
+    bool glitchMoving = fabsf(gGlitch - prevG13) > LATCH_DEADBAND;
+    prevG13 = gGlitch;
+
     renderFrame(sharp, scAX, scAY, scBX, scBY, sfA, sfB, sfC, blur, sym);
+    glitchUpdate(gGlitch, glitchMoving);   // latch tables from fresh smoothCoarse
+    glitchApply();                         // combined-gather geometry on fb
     pushToPanel();
     graphicsTick(0.008f * tscA, 0.001f * tscB, 0.004f * tscC);
 

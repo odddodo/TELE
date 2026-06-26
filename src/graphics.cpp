@@ -30,7 +30,22 @@ static uint16_t fb[W * H];
 static uint16_t paletteLUT[256];
 static uint16_t paletteLUT2[256]; // scratch for palette blend
 
+// ─── glitch state (frozen remaps; rebuilt only on knob motion) ─────────────────
+static int      rowShift[H]           = {0}; // horizontal displacement per dest row
+static int      colShift[W]           = {0}; // vertical displacement per dest column
+static int      dxR = 0, dxB = 0;            // chromatic split (R/B source x offset)
+static uint8_t  glitchColorMask[CW * CH] = {0}; // frozen per-cell corruption gate
+static uint8_t  glitchXorMask          = 0;  // active index xor (0 = none)
+static bool     glitchActive           = false;
+static uint16_t fbSnap[W * H];               // source snapshot for the gather
+
 // ─── math helpers ─────────────────────────────────────────────────────────────
+static inline int wrapi(int v, int n) { v %= n; return v < 0 ? v + n : v; }
+
+// field-sample coordinates for glitch seeding (decorrelated columns/rows)
+static const int GATE_COL = 8,  AMT_COL = 23; // columns of smoothCoarse for row seeding
+static const int GATE_ROW = 8,  AMT_ROW = 23; // rows of smoothCoarse for column seeding
+
 static inline int ffloor(float x)
 {
     int xi = (int)x;
@@ -592,7 +607,80 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
             fidx = fidx < 0 ? 0 : (fidx > 255.0f ? 255.0f : fidx);
             int i0 = (int)fidx;
             int i1 = i0 < 255 ? i0 + 1 : i0;
+
+            // ── frozen index corruption ──────────────────────────────────────
+            if (glitchXorMask && glitchColorMask[cy * CW + cx])
+            {
+                i0 ^= glitchXorMask;
+                i1  = i0; // flat cell → clean stripe-jump, no blend across the discontinuity
+            }
+
             fb[j * W + i] = lerp565(paletteLUT[i0], paletteLUT[i1], fidx - i0);
+        }
+    }
+}
+
+void glitchUpdate(float g, bool moving)
+{
+    if (!moving) return;
+
+    // ── horizontal tear: per dest row, sample a 1-D vertical profile of the field
+    for (int y = 0; y < H; y++)
+    {
+        int cy = y >> 1;
+        float sGate = smoothCoarse[cy * CW + GATE_COL];
+        float sAmt  = smoothCoarse[cy * CW + AMT_COL];
+        bool active = sGate > (1.0f - g);
+        rowShift[y] = active ? (int)((sAmt - 0.5f) * 2.0f * MAXSHIFT_H * g) : 0;
+    }
+
+    // ── vertical tear: per dest column, sample a 1-D horizontal profile (later onset)
+    for (int x = 0; x < W; x++)
+    {
+        int cx = x >> 1;
+        float sGate = smoothCoarse[GATE_ROW * CW + cx];
+        float sAmt  = smoothCoarse[AMT_ROW * CW + cx];
+        bool active = (g > VERT_ONSET) && (sGate > (1.0f - g));
+        colShift[x] = active ? (int)((sAmt - 0.5f) * 2.0f * MAXSHIFT_V * g) : 0;
+    }
+
+    // ── chromatic split: scalar, upper travel only
+    float gc = (g - CHROMA_ONSET) / (1.0f - CHROMA_ONSET);
+    if (gc < 0) gc = 0;
+    dxR =  (int)(gc * MAXCHROMA);
+    dxB = -(int)(gc * MAXCHROMA);
+
+    // ── index corruption: fixed xor pattern, spatial coverage grows with g
+    float gcol = (g - COLOR_ONSET) / (1.0f - COLOR_ONSET);
+    if (gcol < 0) gcol = 0;
+    glitchXorMask = (gcol > 0.0f) ? XOR_PATTERN : 0;
+    for (int p = 0; p < CW * CH; p++)
+        glitchColorMask[p] = (smoothCoarse[p] > (1.0f - gcol)) ? 1 : 0;
+
+    glitchActive = (g > 0.0001f);
+}
+
+void glitchApply()
+{
+    if (!glitchActive) return;
+    memcpy(fbSnap, fb, sizeof(fb));
+
+    for (int y = 0; y < H; y++)
+    {
+        int rs = rowShift[y];
+        for (int x = 0; x < W; x++)
+        {
+            int cs  = colShift[x];
+            int sxG = wrapi(x - rs, W);
+            int syG = wrapi(y - cs, H);
+            int sxR = wrapi(sxG + dxR, W);
+            int sxB = wrapi(sxG + dxB, W);
+
+            uint16_t pr = fbSnap[syG * W + sxR];
+            uint16_t pg = fbSnap[syG * W + sxG];
+            uint16_t pb = fbSnap[syG * W + sxB];
+
+            fb[y * W + x] = (pr & 0xF800) | (pg & 0x07E0) | (pb & 0x001F);
         }
     }
 }

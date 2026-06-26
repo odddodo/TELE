@@ -15,7 +15,7 @@
 // 10   sin-fold frequency     — channel C (blur)  (SFC_MIN–SFC_MAX)
 // 11   blur amount                         (0 = off, 1 = full)
 // 12   animation time scale   — channel C (blur)  (0 = frozen, max = TSCALE_MAX)
-// 13   (unassigned)
+// 13   glitch amount                      (0 = clean, 1 = full mayhem; latches on motion)
 // 14   horizontal symmetry                 (0–⅓ = none, ⅓–⅔ = mirror, ⅔–1 = doubled)
 // 15   vertical symmetry                   (0–⅓ = none, ⅓–⅔ = mirror, ⅔–1 = doubled)
 // ─────────────────────────────────────────────────────────────────────────────
