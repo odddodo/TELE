@@ -34,17 +34,25 @@ static uint16_t paletteLUT2[256]; // scratch for palette blend
 static int      rowShift[H]           = {0}; // horizontal displacement per dest row
 static int      colShift[W]           = {0}; // vertical displacement per dest column
 static int      dxR = 0, dxB = 0;            // chromatic split (R/B source x offset)
-static uint8_t  glitchColorMask[CW * CH] = {0}; // frozen per-cell corruption gate
-static uint8_t  glitchXorMask          = 0;  // active index xor (0 = none)
+static uint8_t  glitchColorXor[CW * CH] = {0}; // per-cell index-xor (0 = identity)
+static uint32_t latchSeed              = 0;   // frozen seed; reselects while knob moves
 static bool     glitchActive           = false;
 static uint16_t fbSnap[W * H];               // source snapshot for the gather
 
 // ─── math helpers ─────────────────────────────────────────────────────────────
 static inline int wrapi(int v, int n) { v %= n; return v < 0 ? v + n : v; }
 
-// field-sample coordinates for glitch seeding (decorrelated columns/rows)
-static const int GATE_COL = 8,  AMT_COL = 23; // columns of smoothCoarse for row seeding
-static const int GATE_ROW = 8,  AMT_ROW = 23; // rows of smoothCoarse for column seeding
+// field-sample coordinates for optional field-weight term in glitch seeding
+static const int AMT_COL = 23; // column of smoothCoarse for row field term
+static const int AMT_ROW = 23; // row of smoothCoarse for column field term
+
+static inline uint32_t hash32(uint32_t x)   // lowbias32 finalizer, good distribution
+{
+    x ^= x >> 16; x *= 0x7FEB352Du;
+    x ^= x >> 15; x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return x;
+}
 
 static inline int ffloor(float x)
 {
@@ -609,11 +617,8 @@ void renderFrame(float soft, float scAX, float scAY, float scBX, float scBY,
             int i1 = i0 < 255 ? i0 + 1 : i0;
 
             // ── frozen index corruption ──────────────────────────────────────
-            if (glitchXorMask && glitchColorMask[cy * CW + cx])
-            {
-                i0 ^= glitchXorMask;
-                i1  = i0; // flat cell → clean stripe-jump, no blend across the discontinuity
-            }
+            uint8_t cm = glitchColorXor[cy * CW + cx];
+            if (cm) { i0 ^= cm; i1 = i0; } // per-cell xor; flat cell → clean stripe-jump
 
             fb[j * W + i] = lerp565(paletteLUT[i0], paletteLUT[i1], fidx - i0);
         }
@@ -624,38 +629,54 @@ void glitchUpdate(float g, bool moving)
 {
     if (!moving) return;
 
-    // ── horizontal tear: per dest row, sample a 1-D vertical profile of the field
+    // frozen seed: mixes a few field cells, drifts while turning and freezes on release
+    latchSeed = hash32((uint32_t)(smoothCoarse[ 5 * CW +  7] * 65535.0f)
+                     ^  (uint32_t)(smoothCoarse[17 * CW + 23] * 65535.0f) * 0x9E3779B1u
+                     ^  (uint32_t)(smoothCoarse[28 * CW + 11] * 65535.0f) * 0x85EBCA77u);
+
+    // ── horizontal tear: amplitude from hash (full variance at any density) ───────
     for (int y = 0; y < H; y++)
     {
-        int cy = y >> 1;
-        float sGate = smoothCoarse[cy * CW + GATE_COL];
-        float sAmt  = smoothCoarse[cy * CW + AMT_COL];
-        bool active = sGate > (1.0f - g);
-        rowShift[y] = active ? (int)((sAmt - 0.5f) * 2.0f * MAXSHIFT_H * g) : 0;
+        uint32_t h      = hash32((uint32_t)y * 0x9E3779B1u ^ latchSeed);
+        bool     active = (h & 0xFF) < (uint32_t)(g * 256.0f);
+        float    hashT  = ((int)((h >> 8) & 0xFF) - 128) * (1.0f / 128.0f);
+        float    fieldT = (smoothCoarse[(y >> 1) * CW + AMT_COL] - 0.5f) * 2.0f;
+        float    base   = (1.0f - FIELD_WEIGHT) * hashT + FIELD_WEIGHT * fieldT;
+        rowShift[y]     = active ? (int)(base * MAXSHIFT_H * g) : 0;
     }
 
-    // ── vertical tear: per dest column, sample a 1-D horizontal profile (later onset)
+    // ── vertical tear (later onset) ──────────────────────────────────────────────
     for (int x = 0; x < W; x++)
     {
-        int cx = x >> 1;
-        float sGate = smoothCoarse[GATE_ROW * CW + cx];
-        float sAmt  = smoothCoarse[AMT_ROW * CW + cx];
-        bool active = (g > VERT_ONSET) && (sGate > (1.0f - g));
-        colShift[x] = active ? (int)((sAmt - 0.5f) * 2.0f * MAXSHIFT_V * g) : 0;
+        uint32_t h      = hash32((uint32_t)x * 0x85EBCA77u ^ ~latchSeed);
+        bool     active = (g > VERT_ONSET) && ((h & 0xFF) < (uint32_t)(g * 256.0f));
+        float    hashT  = ((int)((h >> 8) & 0xFF) - 128) * (1.0f / 128.0f);
+        float    fieldT = (smoothCoarse[AMT_ROW * CW + (x >> 1)] - 0.5f) * 2.0f;
+        float    base   = (1.0f - FIELD_WEIGHT) * hashT + FIELD_WEIGHT * fieldT;
+        colShift[x]     = active ? (int)(base * MAXSHIFT_V * g) : 0;
     }
 
-    // ── chromatic split: scalar, upper travel only
+    // ── chromatic split: scalar, upper travel (unchanged) ───────────────────────
     float gc = (g - CHROMA_ONSET) / (1.0f - CHROMA_ONSET);
     if (gc < 0) gc = 0;
     dxR =  (int)(gc * MAXCHROMA);
     dxB = -(int)(gc * MAXCHROMA);
 
-    // ── index corruption: fixed xor pattern, spatial coverage grows with g
+    // ── per-cell colour corruption: coverage and magnitude both ramp with gcol so
+    //    colour blooms in instead of popping. Early = low bits (±1–3 indices), late = full.
     float gcol = (g - COLOR_ONSET) / (1.0f - COLOR_ONSET);
     if (gcol < 0) gcol = 0;
-    glitchXorMask = (gcol > 0.0f) ? XOR_PATTERN : 0;
+    float bits   = gcol * 8.0f;
+    int   bWhole = (int)bits;
+    float bFrac  = bits - bWhole;
     for (int p = 0; p < CW * CH; p++)
-        glitchColorMask[p] = (smoothCoarse[p] > (1.0f - gcol)) ? 1 : 0;
+    {
+        uint32_t h      = hash32((uint32_t)p * 0x27D4EB2Fu ^ latchSeed);
+        bool     active = (h & 0xFF) < (uint32_t)(gcol * 256.0f);
+        int      nb     = bWhole + (((h >> 24) & 0xFF) < (uint32_t)(bFrac * 256.0f) ? 1 : 0);
+        uint8_t  budget = (uint8_t)(((1u << nb) - 1) & XOR_BITS);
+        glitchColorXor[p] = active ? (uint8_t)((h >> 8) & budget) : 0;
+    }
 
     glitchActive = (g > 0.0001f);
 }
