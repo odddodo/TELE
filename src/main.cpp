@@ -1,10 +1,49 @@
 #include <Arduino.h>
+#include <Preferences.h>
 #include "graphics.h"
 #include "comms.h"
 
 static float smooth[COMMS_MAX_VALS];   // EMA-smoothed 0–1 values from remote pots
 
+// ─── persisted state / recall ─────────────────────────────────────────────────
+static const uint16_t STATE_MAGIC      = 0x7E1E;  // bump if smooth[] layout changes
+static const uint32_t COMMS_TIMEOUT_MS = 1200;    // no packets this long ⇒ remote silent
+static const float    FADE_S           = 3.0f;    // glide-to-saved duration (seconds)
+static const uint32_t BTN_DEBOUNCE_MS  = 200;     // save-button debounce / repeat lock
+
+static Preferences prefs;
+static float    saved[COMMS_MAX_VALS];            // last "liked" state (mirror of NVS blob)
+static uint32_t lastPacketMs = 0;
+static bool     everReceived = false;             // gates commsActive until first packet
+
 static inline float toScale(float v) { return SCALE_MIN + v * (SCALE_MAX - SCALE_MIN); }
+
+void stateInit()
+{
+    bool ok = false;
+    prefs.begin("tele", true);                    // read-only; missing namespace ⇒ defaults
+    if (prefs.getUShort("magic", 0) == STATE_MAGIC &&
+        prefs.getBytesLength("pots") == sizeof(saved))
+    {
+        prefs.getBytes("pots", saved, sizeof(saved));
+        ok = true;
+    }
+    prefs.end();
+
+    if (!ok)
+        for (int k = 0; k < COMMS_MAX_VALS; k++) saved[k] = 0.5f;   // first-boot fallback
+
+    for (int k = 0; k < COMMS_MAX_VALS; k++) smooth[k] = saved[k];  // come up correct, no ramp
+}
+
+void stateSave()
+{
+    prefs.begin("tele", false);
+    prefs.putUShort("magic", STATE_MAGIC);
+    prefs.putBytes("pots", saved, sizeof(saved));
+    prefs.end();
+    Serial.println("state saved");
+}
 
 void setup()
 {
@@ -14,8 +53,7 @@ void setup()
     pinMode(PIN_BUTTON_UP,   INPUT_PULLUP);
     pinMode(PIN_BUTTON_DOWN, INPUT_PULLUP);
 
-    // start smooth[] at mid-range so the noise looks reasonable before any packet arrives
-    for (int k = 0; k < COMMS_MAX_VALS; k++) smooth[k] = 0.5f;
+    stateInit();   // load saved[] from NVS (or 0.5 fallback) and seed smooth[] = saved[]
 
     graphicsInit(0);
     commsInit();
@@ -25,7 +63,14 @@ void setup()
 
 void loop()
 {
-    // ── absorb latest ESP-NOW packet into smoothed values ───────────────────
+    // ── time base ──────────────────────────────────────────────────────────────
+    uint32_t now = millis();
+    static uint32_t lastLoopMs = 0;
+    float dtSec = lastLoopMs ? (now - lastLoopMs) * 0.001f : 0.0f;
+    float fps   = lastLoopMs ? 1000.0f / (now - lastLoopMs) : 0.0f;
+    lastLoopMs = now;
+
+    // ── absorb latest ESP-NOW packet (existing EMA, plus liveness tracking) ─────
     if (commsFresh())
     {
         CommsPacket pkt;
@@ -33,9 +78,46 @@ void loop()
         for (int k = 0; k < pkt.count && k < COMMS_MAX_VALS; k++)
         {
             float raw = pkt.vals[k] / 4095.0f;
-            smooth[k] += 0.15f * (raw - smooth[k]);   // α = 0.15 EMA
+            smooth[k] += 0.15f * (raw - smooth[k]);
         }
+        lastPacketMs = now;
+        everReceived = true;
     }
+
+    // ── remote liveness + glide-to-saved on silence ────────────────────────────
+    bool commsActive = everReceived && (now - lastPacketMs < COMMS_TIMEOUT_MS);
+
+    static bool  wasActive = false;
+    static float fadeStart[COMMS_MAX_VALS];
+    static float fadeT = 0.0f;
+
+    if (wasActive && !commsActive)                 // remote just fell silent
+    {
+        for (int k = 0; k < COMMS_MAX_VALS; k++) fadeStart[k] = smooth[k];
+        fadeT = 0.0f;
+    }
+    wasActive = commsActive;
+
+    if (everReceived && !commsActive)              // glide smooth[] → saved[]
+    {
+        fadeT += dtSec;
+        float f = fadeT / FADE_S;
+        if (f > 1.0f) f = 1.0f;
+        for (int k = 0; k < COMMS_MAX_VALS; k++)
+            smooth[k] = fadeStart[k] + (saved[k] - fadeStart[k]) * f;
+    }
+
+    // ── save button (PIN_BUTTON_UP, active-low) ────────────────────────────────
+    static bool     btnPrev = true;                // released = HIGH
+    static uint32_t btnMs   = 0;
+    bool btnNow = digitalRead(PIN_BUTTON_UP);
+    if (btnPrev && !btnNow && (now - btnMs) > BTN_DEBOUNCE_MS)
+    {
+        btnMs = now;
+        for (int k = 0; k < COMMS_MAX_VALS; k++) saved[k] = smooth[k];
+        stateSave();
+    }
+    btnPrev = btnNow;
 
     // ── pot 14/15 → symmetry mode (H and V independently) ──────────────────
     // each pot: [0, 1/3) = none, [1/3, 2/3) = mirror, [2/3, 1] = doubled/folded
@@ -78,11 +160,6 @@ void loop()
         buildPaletteBlend(palT);
         lastPalT = palT;
     }
-    static uint32_t lastFrameMs = 0;
-    uint32_t now = millis();
-    float fps = lastFrameMs ? 1000.0f / (now - lastFrameMs) : 0.0f;
-    lastFrameMs = now;
-
     // ── pot 13 → glitch amount + latch trigger ─────────────────────────────────
     float gGlitch = smooth[13];
     static float prevG13 = 0.0f;
