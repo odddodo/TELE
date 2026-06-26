@@ -37,20 +37,15 @@ void loop()
         }
     }
 
-    // ── on-board buttons cycle symmetry mode (UP=next, DOWN=prev) ───────────
-    // modes 1–7: none, H, V, H+V, doubled-H, doubled-V, doubled-H+V
-    static int     sym      = 1;
-    static bool    upPrev   = HIGH, downPrev = HIGH;
-    static uint32_t upMs   = 0,    downMs   = 0;
+    // ── pot 14/15 → symmetry mode (H and V independently) ──────────────────
+    // each pot: [0, 1/3) = none, [1/3, 2/3) = mirror, [2/3, 1] = doubled/folded
+    // missing combos (mirror+doubled across axes): doubled axis wins
+    int sym;
     {
-        bool upNow   = digitalRead(PIN_BUTTON_UP);
-        bool downNow = digitalRead(PIN_BUTTON_DOWN);
-        uint32_t ms  = millis();
-        if (upPrev == HIGH && upNow == LOW && ms - upMs > 200)
-            { sym = sym % 7 + 1; upMs = ms; }
-        if (downPrev == HIGH && downNow == LOW && ms - downMs > 200)
-            { sym = (sym == 1) ? 7 : sym - 1; downMs = ms; }
-        upPrev = upNow; downPrev = downNow;
+        int hMode = smooth[14] < (1.0f/3.0f) ? 0 : smooth[14] < (2.0f/3.0f) ? 1 : 2;
+        int vMode = smooth[15] < (1.0f/3.0f) ? 0 : smooth[15] < (2.0f/3.0f) ? 1 : 2;
+        static const int symTable[3][3] = {{1,3,6},{2,4,6},{5,5,7}};
+        sym = symTable[hMode][vMode];
     }
 
     // ── map remote pots ──────────────────────────────────────────────────────
@@ -62,6 +57,8 @@ void loop()
     // 10:  sin fold frequency blur channel C
     // 11:  blur amount (0 = off, 1 = full)
     // 12:  blur channel time scale (0 = frozen, matches tscA/tscB behaviour)
+    // 14:  horizontal symmetry (none / mirror / doubled)
+    // 15:  vertical symmetry  (none / mirror / doubled)
     float tscA  = smooth[4] * TSCALE_MAX;
     float tscB  = smooth[5] * TSCALE_MAX;
     float tscC  = smooth[12] * TSCALE_MAX;
