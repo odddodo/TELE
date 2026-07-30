@@ -124,17 +124,16 @@ void loop()
     }
     btnPrev = btnNow;
 
-    // ── pot 14/15 → symmetry mode (H and V independently) ──────────────────
-    // each pot: [0, 1/3) = none, [1/3, 2/3) = mirror, [2/3, 1] = doubled/folded
-    // missing combos (mirror+doubled across axes): doubled axis wins
+    // ── pot 15 → symmetry mode (single pot, all options) ────────────────────
+    // 5 equal zones sweeping none → horizontal → horizontal+vertical → vertical → none
+    // [0,.2) none | [.2,.4) horizontal | [.4,.6) horiz+vert | [.6,.8) vertical | [.8,1] none
     int sym;
     {
-        int hMode = smooth[14] < (1.0f / 3.0f) ? 0 : smooth[14] < (2.0f / 3.0f) ? 1
-                                                                                : 2;
-        int vMode = smooth[15] < (1.0f / 3.0f) ? 0 : smooth[15] < (2.0f / 3.0f) ? 1
-                                                                                : 2;
-        static const int symTable[3][3] = {{1, 3, 6}, {2, 4, 6}, {5, 5, 7}};
-        sym = symTable[hMode][vMode];
+        float s = smooth[15];
+        sym = s < 0.2f ? 1 : s < 0.4f ? 2
+                          : s < 0.6f  ? 4
+                          : s < 0.8f  ? 3
+                                      : 1;
     }
 
     // ── map remote pots ──────────────────────────────────────────────────────
@@ -145,14 +144,13 @@ void loop()
     // 9:   softXor sharpness
     // 10:  sin fold frequency blur channel C
     // 11:  blur amount (0 = off, 1 = full)
-    // 12:  palette fold multiplier (1x-10x); repeats the palette mapping across the LUT
-    //      (blur channel time scale is now fixed at 0.5, no longer pot-driven)
-    // 13:  glitch amount (0 = clean, 1 = full mayhem; latch triggered by knob motion)
-    // 14:  horizontal symmetry (none / mirror / doubled)
-    // 15:  vertical symmetry  (none / mirror / doubled)
+    // 12:  blur channel (C) time scale
+    // 13:  palette fold multiplier (1x-10x); repeats the palette mapping across the LUT
+    // 14:  glitch amount (0 = clean, 1 = full mayhem; latch triggered by knob motion)
+    // 15:  symmetry (none / horizontal / horizontal+vertical / vertical / none)
     float tscA = smooth[4] * TSCALE_MAX;
     float tscB = smooth[5] * TSCALE_MAX;
-    float tscC = 0.1f * TSCALE_MAX;
+    float tscC = smooth[12] * TSCALE_MAX;
     float sfA = SF_MIN + smooth[6] * (SF_MAX - SF_MIN);
     float sfB = SF_MIN + smooth[7] * (SF_MAX - SF_MIN);
     float sfC = SFC_MIN + smooth[10] * (SFC_MAX - SFC_MIN);
@@ -165,7 +163,7 @@ void loop()
     static float lastPalT = -999.0f;
     static float lastPalFold = -999.0f;
     float palT = smooth[8] * (PALETTE_COUNT - 1);
-    float palFold = 1.0f + smooth[12] * 9.0f; // pot 12 → palette repeat 1x-10x
+    float palFold = 1.0f + smooth[13] * 9.0f; // pot 13 → palette repeat 1x-10x
     if (fabsf(palT - lastPalT) > (1.0f / 512.0f) ||
         fabsf(palFold - lastPalFold) > (1.0f / 512.0f))
     {
@@ -173,11 +171,11 @@ void loop()
         lastPalT = palT;
         lastPalFold = palFold;
     }
-    // ── pot 13 → glitch amount + latch trigger ─────────────────────────────────
-    float gGlitch = smooth[13];
-    static float prevG13 = 0.0f;
-    bool glitchMoving = fabsf(gGlitch - prevG13) > LATCH_DEADBAND;
-    prevG13 = gGlitch;
+    // ── pot 14 → glitch amount + latch trigger ─────────────────────────────────
+    float gGlitch = smooth[14];
+    static float prevG14 = 0.0f;
+    bool glitchMoving = fabsf(gGlitch - prevG14) > LATCH_DEADBAND;
+    prevG14 = gGlitch;
 
     renderFrame(sharp, scAX, scAY, scBX, scBY, sfA, sfB, sfC, blur, sym);
     glitchUpdate(gGlitch, glitchMoving); // latch tables from fresh smoothCoarse
