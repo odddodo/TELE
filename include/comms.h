@@ -30,6 +30,26 @@ struct __attribute__((packed)) CommsPacket
     uint16_t vals[COMMS_MAX_VALS];    // raw ADC, 0–4095
 };
 
+// ─── commands (first byte = COMMS_CMD_MAGIC, never a valid pot count) ─────────
+#define COMMS_CMD_MAGIC 0xC0
+
+enum : uint8_t
+{
+    CMD_SLEEP = 0x01, // remote → display: going to deep sleep, hold current state
+    CMD_SAVE  = 0x02, // remote → display: save current state as preset (NVS)
+    CMD_ACK   = 0x80, // display → remote: command executed; arg = acked cmd
+};
+
+struct __attribute__((packed)) CommsCmd
+{
+    uint8_t magic; // COMMS_CMD_MAGIC
+    uint8_t cmd;   // CMD_*
+    uint8_t seq;   // sender sequence number; the ACK echoes it
+    uint8_t arg;   // CMD_ACK: the command being acknowledged; otherwise 0
+};
+
 void commsInit();
 bool commsFresh();                    // true once per received packet, then resets
 void commsGet(CommsPacket &out);      // copy of the latest packet
+bool commsTakeCmd(CommsCmd &out, bool &isNew); // true once per received command copy
+void commsAck(uint8_t cmd, uint8_t seq);       // send CMD_ACK back (broadcast)

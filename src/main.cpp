@@ -15,6 +15,7 @@ static Preferences prefs;
 static float saved[COMMS_MAX_VALS]; // last "liked" state (mirror of NVS blob)
 static uint32_t lastPacketMs = 0;
 static bool everReceived = false; // gates commsActive until first packet
+static bool remoteAsleep = false; // remote sent CMD_SLEEP: hold smooth[] frozen
 
 static inline float toScale(float v) { return SCALE_MIN + v * (SCALE_MAX - SCALE_MIN); }
 
@@ -45,6 +46,14 @@ void stateSave()
     prefs.putBytes("pots", saved, sizeof(saved));
     prefs.end();
     Serial.println("state saved");
+}
+
+// Current picture → preset (RAM mirror + NVS). Used by the local button and the remote.
+static void presetSave()
+{
+    for (int k = 0; k < COMMS_MAX_VALS; k++)
+        saved[k] = smooth[k];
+    stateSave();
 }
 
 void setup()
@@ -84,6 +93,30 @@ void loop()
         }
         lastPacketMs = now;
         everReceived = true;
+        remoteAsleep = false; // any pot packet ⇒ remote is awake
+    }
+
+    // ── remote commands (sleep / save), ACK after executing ─────────────────────
+    {
+        CommsCmd cmd;
+        bool isNew;
+        if (commsTakeCmd(cmd, isNew))
+        {
+            if (isNew)
+            {
+                switch (cmd.cmd)
+                {
+                case CMD_SLEEP:
+                    remoteAsleep = true; // freeze smooth[] = hold current picture
+                    Serial.println("remote asleep: holding");
+                    break;
+                case CMD_SAVE:
+                    presetSave(); // prints "state saved"
+                    break;
+                }
+            }
+            commsAck(cmd.cmd, cmd.seq); // ACK after executing, also for duplicates
+        }
     }
 
     // ── remote liveness + glide-to-saved on silence ────────────────────────────
@@ -93,7 +126,7 @@ void loop()
     static float fadeStart[COMMS_MAX_VALS];
     static float fadeT = 0.0f;
 
-    if (wasActive && !commsActive) // remote just fell silent
+    if (wasActive && !commsActive && !remoteAsleep) // remote just fell silent
     {
         for (int k = 0; k < COMMS_MAX_VALS; k++)
             fadeStart[k] = smooth[k];
@@ -101,7 +134,7 @@ void loop()
     }
     wasActive = commsActive;
 
-    if (everReceived && !commsActive) // glide smooth[] → saved[]
+    if (everReceived && !commsActive && !remoteAsleep) // glide smooth[] → saved[]
     {
         fadeT += dtSec;
         float f = fadeT / FADE_S;
@@ -118,9 +151,7 @@ void loop()
     if (btnPrev && !btnNow && (now - btnMs) > BTN_DEBOUNCE_MS)
     {
         btnMs = now;
-        for (int k = 0; k < COMMS_MAX_VALS; k++)
-            saved[k] = smooth[k];
-        stateSave();
+        presetSave();
     }
     btnPrev = btnNow;
 
